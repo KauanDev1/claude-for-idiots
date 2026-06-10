@@ -8,64 +8,25 @@
 
 ---
 
-## What is this? (in plain words)
-
-You're building something with Claude Code, but:
-
-- it keeps using words you don't understand (and don't feel like looking up), and
-- you're not totally sure it's doing things "the right way".
-
-This skill fixes both. When you turn it on, Claude:
-
-- **talks to you the way *you* choose** — no jargon at all, jargon *with* simple
-  explanations, or jargon as usual;
-- **follows good engineering habits automatically** — tests, safe commits, a real
-  folder structure, no leaked passwords — so your project doesn't turn into a mess.
-
-You don't need to know what "migration", "CORS" or "architecture" mean. That's
-the whole point. Beginners and experienced devs both use it — it just adapts.
-
-## Why I built this
-
-I was coding with Claude Code and ran into two things that bugged me:
-
-1. It kept throwing around technical words I didn't understand — and honestly
-   didn't want to stop and learn right then.
-2. I wanted it to just follow the basics of good software — a real architecture,
-   tests, careful commits — instead of improvising something different every time.
-
-So I built this to keep Claude **on the rails**. And while I was at it, I made it
-friendly enough that someone with **zero coding background** can use Claude
-comfortably too.
-
-## Should you use it on your project?
-
-Honest answer: **not always.** The guard-rails cost something — tests, checks
-and commits on every feature — so they have to buy you more than they cost.
-
-| Project | Use it? |
-|---|---|
-| A real app/site/API you'll keep working on (weeks, months) | ✅ Yes — the sweet spot |
-| Your first serious project / learning by building something real | ✅ Yes — it was made for this |
-| Anything with a database and/or a public repo | ✅ Yes — the migration and secret rules exist for exactly this |
-| A quick throwaway script or one-afternoon experiment | ❌ No — plain Claude is faster; the overhead isn't worth it |
-| An existing codebase with its own conventions / a team project | ❌ Not yet — the skill assumes a fresh project |
-
-Rule of thumb: **if the project will still matter in two weeks, turn it on; if
-it's disposable, don't.** That's also why it only runs when you invoke it
-explicitly.
-
 ## How to use
 
 ### 1. Install (once)
 
+**Requirements:** Python 3 and [Claude Code](https://claude.com/claude-code).
+
+**macOS / Linux**
 ```bash
 git clone https://github.com/JulioBarbosaS/Claude-For-Idiots.git
 cp -r Claude-For-Idiots ~/.claude/skills/claude-for-idiots
 ```
 
-Then restart Claude Code so it picks up the new skill. (The hooks need `python3`
-available on your machine.)
+**Windows (PowerShell)**
+```powershell
+git clone https://github.com/JulioBarbosaS/Claude-For-Idiots.git
+Copy-Item -Recurse Claude-For-Idiots "$env:USERPROFILE\.claude\skills\claude-for-idiots"
+```
+
+Then restart Claude Code so it picks up the new skill.
 
 ### 2. Turn it on — explicitly
 
@@ -102,6 +63,73 @@ everything up for that project.
 Updates the skill itself and — if the current project was configured by it —
 brings the project's guard-rails up to date too, **keeping all your choices**.
 It tells you what changed before touching anything.
+
+---
+
+## What is this? (in plain words)
+
+You're building something with Claude Code, but:
+
+- it keeps using words you don't understand (and don't feel like looking up), and
+- you're not totally sure it's doing things "the right way".
+
+This skill fixes both. When you turn it on, Claude:
+
+- **talks to you the way *you* choose** — no jargon at all, jargon *with* simple
+  explanations, or jargon as usual;
+- **follows good engineering habits automatically** — tests, safe commits, a real
+  folder structure, no leaked passwords — so your project doesn't turn into a mess.
+
+You don't need to know what "migration", "CORS" or "architecture" mean. That's
+the whole point. Beginners and experienced devs both use it — it just adapts.
+
+## Why I built this
+
+I was coding with Claude Code and ran into two things that bugged me:
+
+1. It kept throwing around technical words I didn't understand — and honestly
+   didn't want to stop and learn right then.
+2. I wanted it to just follow the basics of good software — a real architecture,
+   tests, careful commits — instead of improvising something different every time.
+
+So I built this to keep Claude **on the rails**. And while I was at it, I made it
+friendly enough that someone with **zero coding background** can use Claude
+comfortably too.
+
+## What can I build with it?
+
+The skill knows how to pick an architecture for these project types:
+
+| What you want to build | Stack it recommends |
+|---|---|
+| Website / web app | Next.js (React + TypeScript) |
+| Simple static / content site | Astro or plain HTML + CSS + JS |
+| REST API or backend service | FastAPI (Python) or NestJS (TypeScript) |
+| Full-stack app (UI + API + DB) | Next.js + Postgres (via Prisma) |
+| Mobile app (iOS + Android) | Flutter |
+| CLI tool / automation script | Python (Typer) or Node (Commander) |
+| Data analysis / ML prototype | Python (pandas / scikit-learn / notebooks) |
+| Discord / Telegram bot | Python or Node |
+| Desktop app | Tauri or Electron |
+
+Advanced users can always choose their own stack — the catalog is just the default.
+
+## Should you use it on your project?
+
+Honest answer: **not always.** The guard-rails cost something — tests, checks
+and commits on every feature — so they have to buy you more than they cost.
+
+| Project | Use it? |
+|---|---|
+| A real app/site/API you'll keep working on (weeks, months) | ✅ Yes — the sweet spot |
+| Your first serious project / learning by building something real | ✅ Yes — it was made for this |
+| Anything with a database and/or a public repo | ✅ Yes — the migration and secret rules exist for exactly this |
+| A quick throwaway script or one-afternoon experiment | ❌ No — plain Claude is faster; the overhead isn't worth it |
+| An existing codebase with its own conventions / a team project | ❌ Not yet — the skill assumes a fresh project |
+
+Rule of thumb: **if the project will still matter in two weeks, turn it on; if
+it's disposable, don't.** That's also why it only runs when you invoke it
+explicitly.
 
 ## What it improves
 
@@ -146,7 +174,7 @@ skill is open.
 ```
 SKILL.md                     # the skill's brain (onboarding + behavior)
 references/                  # editable data — extend the skill here
-  rules.md                   #   the 6 rules (source of truth)
+  rules.md                   #   the 9 rules (source of truth)
   stack-catalog.md           #   objective → stack
   architecture-catalog.md    #   stack → idiomatic architecture
   onboarding-flow.md         #   the questions

@@ -8,68 +8,25 @@
 
 ---
 
-## O que é isso? (em palavras simples)
-
-Você está construindo algo com o Claude Code, mas:
-
-- ele fica usando palavras que você não entende (e nem quer parar pra pesquisar), e
-- você não tem certeza se ele está fazendo as coisas "do jeito certo".
-
-Essa skill resolve os dois. Quando você liga ela, o Claude:
-
-- **fala com você do jeito que *você* escolher** — sem nenhum termo técnico, com
-  os termos *acompanhados* de explicações simples, ou com os termos normalmente;
-- **segue boas práticas de engenharia automaticamente** — testes, commits
-  seguros, uma estrutura de pastas de verdade, sem vazar senhas — pra o seu
-  projeto não virar uma bagunça.
-
-Você não precisa saber o que significam "migration", "CORS" ou "arquitetura". Esse
-é exatamente o ponto. Tanto iniciantes quanto pessoas experientes usam — ela só
-se adapta.
-
-## Por que eu criei isso
-
-Eu estava programando com o Claude Code e esbarrei em duas coisas que me
-incomodavam:
-
-1. Ele ficava jogando palavras técnicas que eu não entendia — e, sinceramente,
-   não queria parar pra aprender naquele momento.
-2. Eu queria que ele simplesmente seguisse o básico de um bom software — uma
-   arquitetura de verdade, testes, commits com cuidado — em vez de improvisar de
-   um jeito diferente toda vez.
-
-Então criei isso pra manter o Claude **na linha**. E, já que estava nisso, deixei
-amigável o suficiente pra que alguém com **zero experiência em programação**
-também consiga usar o Claude tranquilamente.
-
-## Devo usar no meu projeto?
-
-Resposta honesta: **nem sempre.** Os guard-rails têm custo — testes, checagens e
-commits a cada feature — então eles precisam render mais do que custam.
-
-| Projeto | Usar? |
-|---|---|
-| Um app/site/API de verdade que você vai continuar mexendo (semanas, meses) | ✅ Sim — é o ponto ideal |
-| Seu primeiro projeto sério / aprender construindo algo real | ✅ Sim — foi feita pra isso |
-| Qualquer coisa com banco de dados e/ou repositório público | ✅ Sim — as regras de migração e segredo existem exatamente pra isso |
-| Script descartável ou experimento de uma tarde | ❌ Não — o Claude puro é mais rápido; o overhead não compensa |
-| Codebase que já existe com convenções próprias / projeto de equipe | ❌ Ainda não — a skill assume projeto novo |
-
-Regra de bolso: **se o projeto ainda vai importar daqui a duas semanas, liga; se
-é descartável, não liga.** É também por isso que ela só roda quando você invoca
-explicitamente.
-
 ## Como usar
 
 ### 1. Instalar (uma vez)
 
+**Requisitos:** Python 3 e [Claude Code](https://claude.com/claude-code).
+
+**macOS / Linux**
 ```bash
 git clone https://github.com/JulioBarbosaS/Claude-For-Idiots.git
 cp -r Claude-For-Idiots ~/.claude/skills/claude-for-idiots
 ```
 
-Depois reinicie o Claude Code pra ele reconhecer a nova skill. (Os hooks precisam
-do `python3` disponível na sua máquina.)
+**Windows (PowerShell)**
+```powershell
+git clone https://github.com/JulioBarbosaS/Claude-For-Idiots.git
+Copy-Item -Recurse Claude-For-Idiots "$env:USERPROFILE\.claude\skills\claude-for-idiots"
+```
+
+Depois reinicie o Claude Code pra ele reconhecer a nova skill.
 
 ### 2. Ligar — de forma explícita
 
@@ -107,6 +64,77 @@ tudo pra aquele projeto.
 Atualiza a própria skill e — se o projeto atual foi configurado por ela — traz
 os guard-rails do projeto pra versão nova também, **mantendo todas as suas
 escolhas**. Ele te conta o que mudou antes de tocar em qualquer coisa.
+
+---
+
+## O que é isso? (em palavras simples)
+
+Você está construindo algo com o Claude Code, mas:
+
+- ele fica usando palavras que você não entende (e nem quer parar pra pesquisar), e
+- você não tem certeza se ele está fazendo as coisas "do jeito certo".
+
+Essa skill resolve os dois. Quando você liga ela, o Claude:
+
+- **fala com você do jeito que *você* escolher** — sem nenhum termo técnico, com
+  os termos *acompanhados* de explicações simples, ou com os termos normalmente;
+- **segue boas práticas de engenharia automaticamente** — testes, commits
+  seguros, uma estrutura de pastas de verdade, sem vazar senhas — pra o seu
+  projeto não virar uma bagunça.
+
+Você não precisa saber o que significam "migration", "CORS" ou "arquitetura". Esse
+é exatamente o ponto. Tanto iniciantes quanto pessoas experientes usam — ela só
+se adapta.
+
+## Por que eu criei isso
+
+Eu estava programando com o Claude Code e esbarrei em duas coisas que me
+incomodavam:
+
+1. Ele ficava jogando palavras técnicas que eu não entendia — e, sinceramente,
+   não queria parar pra aprender naquele momento.
+2. Eu queria que ele simplesmente seguisse o básico de um bom software — uma
+   arquitetura de verdade, testes, commits com cuidado — em vez de improvisar de
+   um jeito diferente toda vez.
+
+Então criei isso pra manter o Claude **na linha**. E, já que estava nisso, deixei
+amigável o suficiente pra que alguém com **zero experiência em programação**
+também consiga usar o Claude tranquilamente.
+
+## O que posso construir com isso?
+
+A skill sabe escolher uma arquitetura para esses tipos de projeto:
+
+| O que você quer construir | Stack recomendada |
+|---|---|
+| Site / web app | Next.js (React + TypeScript) |
+| Site estático / conteúdo simples | Astro ou HTML + CSS + JS puro |
+| API REST ou serviço de backend | FastAPI (Python) ou NestJS (TypeScript) |
+| App completo (UI + API + banco) | Next.js + Postgres (via Prisma) |
+| App mobile (iOS + Android) | Flutter |
+| Ferramenta de linha de comando / automação | Python (Typer) ou Node (Commander) |
+| Análise de dados / protótipo de ML | Python (pandas / scikit-learn / notebooks) |
+| Bot de Discord / Telegram | Python ou Node |
+| App desktop | Tauri ou Electron |
+
+Usuários avançados podem sempre escolher a própria stack — o catálogo é só o padrão.
+
+## Devo usar no meu projeto?
+
+Resposta honesta: **nem sempre.** Os guard-rails têm custo — testes, checagens e
+commits a cada feature — então eles precisam render mais do que custam.
+
+| Projeto | Usar? |
+|---|---|
+| Um app/site/API de verdade que você vai continuar mexendo (semanas, meses) | ✅ Sim — é o ponto ideal |
+| Seu primeiro projeto sério / aprender construindo algo real | ✅ Sim — foi feita pra isso |
+| Qualquer coisa com banco de dados e/ou repositório público | ✅ Sim — as regras de migração e segredo existem exatamente pra isso |
+| Script descartável ou experimento de uma tarde | ❌ Não — o Claude puro é mais rápido; o overhead não compensa |
+| Codebase que já existe com convenções próprias / projeto de equipe | ❌ Ainda não — a skill assume projeto novo |
+
+Regra de bolso: **se o projeto ainda vai importar daqui a duas semanas, liga; se
+é descartável, não liga.** É também por isso que ela só roda quando você invoca
+explicitamente.
 
 ## O que ele melhora
 
@@ -154,7 +182,7 @@ até em sessões longas — não só enquanto a skill está aberta.
 ```
 SKILL.md                     # o cérebro da skill (onboarding + comportamento)
 references/                  # dados editáveis — estenda a skill aqui
-  rules.md                   #   as 6 regras (fonte da verdade)
+  rules.md                   #   as 9 regras (fonte da verdade)
   stack-catalog.md           #   objetivo → stack
   architecture-catalog.md    #   stack → arquitetura idiomática
   onboarding-flow.md         #   as perguntas
