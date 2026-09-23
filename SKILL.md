@@ -27,7 +27,7 @@ The skill is the *installer*. The real enforcement lives in the files it writes:
 | Rules + profile | `CLAUDE.md` | Loaded automatically every session. Source of truth for behavior. |
 | Config | `.claude-for-idiots/config.json` | Machine-readable answers from onboarding. Read by the hooks. |
 | Glossary | `.claude-for-idiots/glossary.json` | Tracks which terms were explained and the user's growing level. |
-| Hooks | `.claude/hooks/*.py` | Technically enforce Rules 1, 5 and 6 (block, not just promise). |
+| Hooks | `.claude/hooks/*.py` | Check Rules 1, 5 and 6 on the common paths and block violations (safety net, not a sandbox). |
 | Hook wiring | `.claude/settings.json` | Registers the hooks as `PreToolUse`. |
 | Knowledge base | `docs/INDEX.md` | Long-term memory on demand: ADRs, bug investigations, API quirks. |
 

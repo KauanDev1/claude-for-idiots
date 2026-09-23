@@ -1,7 +1,6 @@
 # Hooks — the technical guardrails
 
-These three Python scripts turn rules 1, 5, and 6 into **guarantees** rather than
-promises. They run as Claude Code `PreToolUse` hooks: before a tool call runs,
+These three Python scripts add a technical check to rules 1, 5 and 6 on the paths Claude Code most often takes. They run as Claude Code `PreToolUse` hooks: before a tool call runs,
 the hook inspects it and can block it.
 
 | Hook | Rule | Matcher | Blocks when… |

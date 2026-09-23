@@ -134,13 +134,13 @@ explicitly.
 ## What it improves
 
 After setup, Claude follows these in **every** session of that project. The ones
-marked **(enforced)** are guaranteed by hooks — Claude literally can't break them:
+marked **(checked)** are checked by a hook — a script blocks the common violation paths. See "Known limitations" for what still gets through:
 
-- **No hand-editing database migrations** *(enforced)* — uses the proper
+- **No hand-editing database migrations** *(checked)* — uses the proper
   generator command instead.
-- **New files stay inside the chosen architecture** *(enforced)* — nothing dumped
+- **New files stay inside the chosen architecture** *(checked)* — nothing dumped
   at random.
-- **Secrets never reach the internet** *(enforced)* — keys/passwords stay in a
+- **Secrets never reach the internet** *(checked)* — keys/passwords stay in a
   local `.env`; anything that publishes is scanned first.
 - **Always writes tests** — and asks before running the slow full suite.
 - **Commits after each feature** — so you never lose progress.

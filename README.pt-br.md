@@ -139,14 +139,13 @@ explicitamente.
 ## O que ele melhora
 
 Depois da configuração, o Claude segue isto em **toda** sessão daquele projeto. Os
-itens marcados com **(garantido)** são impostos por hooks — o Claude literalmente
-não consegue quebrar:
+itens marcados com **(checado)** são checados por um hook — um script bloqueia os caminhos mais comuns de violação. Veja "Limitações conhecidas" para o que ainda passa:
 
-- **Não edita arquivos de migração na mão** *(garantido)* — usa o comando gerador
+- **Não edita arquivos de migração na mão** *(checado)* — usa o comando gerador
   correto.
-- **Arquivos novos ficam dentro da arquitetura escolhida** *(garantido)* — nada
+- **Arquivos novos ficam dentro da arquitetura escolhida** *(checado)* — nada
   jogado em qualquer canto.
-- **Segredos nunca vão pra internet** *(garantido)* — chaves/senhas ficam num
+- **Segredos nunca vão pra internet** *(checado)* — chaves/senhas ficam num
   `.env` local; tudo que publica é varrido antes.
 - **Sempre escreve testes** — e pergunta antes de rodar a suíte completa (que é
   lenta).

@@ -3,8 +3,11 @@
 These are the engineering rules `claude-for-idiots` enforces. The generated
 `CLAUDE.md` copies this text (adapted to the chosen stack). Edit here first.
 
-Rules marked **[hook]** are also enforced technically by a script in `hooks/`,
-so they are guarantees, not just promises.
+Rules marked **[hook]** are additionally checked by a script in `hooks/`. The
+hooks intercept the most common paths (the `Edit`/`Write` tools and shell
+commands that publish) — they are a safety net, **not a sandbox**. Known gaps
+are listed in `hooks/README.md`; a determined or unlucky path can still get
+through, so the written rule still matters.
 
 ---
 
@@ -71,7 +74,7 @@ creating a remote repo, making a repo public, opening a PR — must:
 2. pass a secret scan first.
 
 The worst possible accident for a beginner is publishing a public repo with a
-live API key inside. This rule exists to make that impossible.
+live API key inside. This rule exists to make that much harder — the hook scans what git is about to publish, and refuses the push when it finds something.
 
 ## Rule 7 — Reuse before you build
 
