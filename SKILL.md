@@ -122,8 +122,9 @@ After stack/architecture are settled:
    `architecture.allowed_paths`, `tests`, etc. — the hooks read these. Record
    `skill_version` from this skill's `VERSION` file (updates use it to know
    where the project is starting from).
-3. Create `<project>/.claude/hooks/` and copy the three scripts from this
-   skill's `hooks/` directory into it.
+3. Create `<project>/.claude/hooks/` and copy the four files from this
+   skill's `hooks/` directory (the three hooks plus `_cfi_common.py`, which
+   they import) into it.
 4. Merge `assets/settings.template.json` into `<project>/.claude/settings.json`
    (preserve any existing hooks/keys).
 5. Initialize `<project>/.claude-for-idiots/glossary.json` (see

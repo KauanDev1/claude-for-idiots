@@ -7,12 +7,11 @@ mode can be "deny", "ask" or "off". Only polices code-file creation; ignores
 docs/config and files that already exist (those are edits, not placements).
 Fails open when not configured.
 """
-import fnmatch
-import json
 import os
 import sys
 
-CONFIG_REL = os.path.join(".claude-for-idiots", "config.json")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cfi_common as cfi
 
 CODE_EXT = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".kt",
@@ -20,48 +19,39 @@ CODE_EXT = {
 }
 
 
-def load_config(cwd):
-    try:
-        with open(os.path.join(cwd, CONFIG_REL)) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-
-
 def main():
-    try:
-        event = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        sys.exit(0)
+    event = cfi.read_event()
+    if not event:
+        cfi.allow()
 
-    tool_input = event.get("tool_input") or {}
-    file_path = tool_input.get("file_path") or ""
-    if not file_path:
-        sys.exit(0)
-
+    file_path = cfi.target_path(event.get("tool_input"))
     cwd = event.get("cwd") or os.getcwd()
-    config = load_config(cwd)
+    config = cfi.load_config(cwd)
     if not config:
-        sys.exit(0)
+        cfi.allow()
 
-    arch = config.get("architecture") or {}
+    arch = cfi.section(config, "architecture")
     mode = arch.get("enforce", "off")
-    allowed = arch.get("allowed_paths") or []
+    allowed = cfi.str_list(arch.get("allowed_paths"))
     if mode == "off" or not allowed:
-        sys.exit(0)
+        cfi.allow()
+
+    rel = cfi.relativize(file_path, cwd)
+    if not rel:
+        cfi.allow()
 
     # Only police new code files. Let docs/config and edits-to-existing through.
-    _, ext = os.path.splitext(file_path)
+    _, ext = os.path.splitext(rel)
     if ext.lower() not in CODE_EXT:
-        sys.exit(0)
-    if os.path.exists(file_path):
-        sys.exit(0)
+        cfi.allow()
 
-    rel = os.path.relpath(file_path, cwd) if os.path.isabs(file_path) else file_path
-    rel = rel.replace(os.sep, "/")
+    # An existing file is an edit, not a placement. Resolve against the
+    # EVENT's cwd, never the process cwd — the hook may be invoked anywhere.
+    if os.path.exists(os.path.join(cwd, rel)):
+        cfi.allow()
 
-    if any(fnmatch.fnmatch(rel, p) for p in allowed):
-        sys.exit(0)
+    if cfi.matches_any(rel, allowed):
+        cfi.allow()
 
     layers = arch.get("layers") or {}
     layer_hint = "\n".join(f"    {k}: {v}" for k, v in layers.items()) or "    (see CLAUDE.md)"
@@ -73,14 +63,7 @@ def main():
         "Place the file in the correct layer, or update `architecture` in "
         ".claude-for-idiots/config.json + CLAUDE.md if this is a deliberate change."
     )
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny" if mode == "deny" else "ask",
-            "permissionDecisionReason": reason,
-        }
-    }))
-    sys.exit(0)
+    cfi.decide("deny" if mode == "deny" else "ask", reason)
 
 
 if __name__ == "__main__":

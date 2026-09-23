@@ -181,5 +181,40 @@ class TestScanSecretsBeforePush(TempProject):
         self.assertIsNone(decision(proc))
 
 
+class TestSharedBehavior(TempProject):
+    def test_migration_hook_handles_relative_dot_path(self):
+        self.write_config(MIGRATIONS_CONFIG)
+        proc = run_hook("block_migration_edits.py",
+                        self.event("Edit", file_path="./alembic/versions/a.py"))
+        self.assertEqual(decision(proc), "deny")
+
+    def test_migration_hook_reads_notebook_path(self):
+        self.write_config(MIGRATIONS_CONFIG)
+        proc = run_hook("block_migration_edits.py",
+                        self.event("NotebookEdit",
+                                   notebook_path="alembic/versions/a.ipynb"))
+        self.assertEqual(decision(proc), "deny")
+
+    def test_arch_hook_ignores_path_outside_project(self):
+        self.write_config(ARCH_CONFIG)
+        proc = run_hook("enforce_architecture.py",
+                        self.event("Write", file_path="/etc/cron.d/x.py"))
+        self.assertIsNone(decision(proc))
+        self.assertEqual(proc.returncode, 0)
+
+    def test_arch_hook_existing_file_check_uses_event_cwd(self):
+        """A relative path must resolve against event['cwd'], not the process cwd."""
+        self.write_config(ARCH_CONFIG)
+        target = Path(self.root) / "random" / "old.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("x = 1\n")
+        proc = subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "enforce_architecture.py")],
+            input=json.dumps(self.event("Write", file_path="random/old.py")),
+            capture_output=True, text=True, timeout=30, cwd="/",
+        )
+        self.assertIsNone(decision(proc))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

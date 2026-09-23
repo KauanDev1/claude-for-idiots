@@ -8,11 +8,13 @@ Fails open on every other command.
 
 This is a deliberately simple, extendable scanner — add patterns as needed.
 """
-import json
 import os
 import re
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cfi_common as cfi
 
 PUBLISH_RE = re.compile(
     r"\b(git\s+push|gh\s+repo\s+create|gh\s+release|gh\s+pr\s+create)\b"
@@ -45,16 +47,15 @@ def tracked_files(cwd):
 
 
 def main():
-    try:
-        event = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        sys.exit(0)
+    event = cfi.read_event()
+    if not event:
+        cfi.allow()
 
     if event.get("tool_name") != "Bash":
-        sys.exit(0)
+        cfi.allow()
     command = (event.get("tool_input") or {}).get("command", "")
     if not PUBLISH_RE.search(command):
-        sys.exit(0)
+        cfi.allow()
 
     cwd = event.get("cwd") or os.getcwd()
     findings = []
@@ -78,22 +79,15 @@ def main():
 
     if findings:
         listing = "\n".join(f"  - {x}" for x in findings[:20])
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": (
-                    "BLOCKED by claude-for-idiots Rule 6: possible secrets would "
-                    "be published.\n" + listing + "\n"
-                    "Move secrets to a gitignored .env, add a .env.example, remove "
-                    "them from git history if already committed, then retry. "
-                    "Warn the user clearly in their language."
-                ),
-            }
-        }))
-        sys.exit(0)
+        cfi.decide("deny", (
+            "BLOCKED by claude-for-idiots Rule 6: possible secrets would "
+            "be published.\n" + listing + "\n"
+            "Move secrets to a gitignored .env, add a .env.example, remove "
+            "them from git history if already committed, then retry. "
+            "Warn the user clearly in their language."
+        ))
 
-    sys.exit(0)
+    cfi.allow()
 
 
 if __name__ == "__main__":
