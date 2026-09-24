@@ -230,8 +230,8 @@ class TestRepoConsistency(unittest.TestCase):
             stacks_paths = trp.STACKS[stack_key]
             if catalog_paths != stacks_paths:
                 mismatches.append(
-                    "{}: catalog={} STACKS[{!r}]={}".format(
-                        heading, catalog_paths, stack_key, stacks_paths))
+                    f"{heading}: catalog={catalog_paths} "
+                    f"STACKS[{stack_key!r}]={stacks_paths}")
         self.assertEqual(
             mismatches, [],
             "references/architecture-catalog.md's allowed_paths no longer "
@@ -255,8 +255,7 @@ class TestRepoConsistency(unittest.TestCase):
                 capture_output=True, text=True, timeout=10)
             if proc.returncode != 0:
                 failures.append(
-                    "{}.{} = {!r}: {}".format(
-                        section, field, command, proc.stderr.strip()))
+                    f"{section}.{field} = {command!r}: {proc.stderr.strip()}")
         self.assertEqual(
             failures, [],
             "assets/config.example.json has a command that is not valid "
@@ -284,9 +283,8 @@ class TestRepoConsistency(unittest.TestCase):
                         timeout=15)
                     if proc.returncode != 0:
                         failures.append(
-                            "{} exited {} on payload {!r}: {}".format(
-                                hook.name, proc.returncode, name,
-                                proc.stderr.strip()[-400:]))
+                            f"{hook.name} exited {proc.returncode} on "
+                            f"payload {name!r}: {proc.stderr.strip()[-400:]}")
         self.assertEqual(
             failures, [],
             "every hook must fail open (exit 0) on ANY malformed input -- "
@@ -314,7 +312,7 @@ class TestRepoConsistency(unittest.TestCase):
                 continue
             for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if pattern.search(line):
-                    failures.append("{}:{}: {}".format(rel, lineno, line.strip()))
+                    failures.append(f"{rel}:{lineno}: {line.strip()}")
         self.assertEqual(
             failures, [],
             "shipped docs must describe hooks as a safety net, not a "
