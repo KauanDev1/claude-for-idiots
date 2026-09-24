@@ -19,9 +19,13 @@ migrations directory directly.
 To change the database schema:
 1. Change the models / schema definition.
 2. Run the library's generator, e.g.:
-   - Alembic: `alembic revision --autogenerate -m "describe change"`
-   - Prisma: `prisma migrate dev --name describe_change`
-   - Django: `python manage.py makemigrations`
+   - Alembic: `alembic revision --autogenerate -m "describe change" && alembic upgrade head`
+   - Prisma: `npx prisma migrate dev --name describe_change` (already applies it)
+   - Django: `python manage.py makemigrations && python manage.py migrate`
+
+   Generating the migration does not change the database. Skip the
+   apply/migrate step and the schema stays the old one — the error only
+   shows up on the next query, far from the actual cause.
 3. Review the generated file (reading is fine; editing it by hand is not).
 
 The protected paths and the exact command live in

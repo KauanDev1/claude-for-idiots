@@ -42,6 +42,22 @@ class TestCharacterClass(unittest.TestCase):
             self.fail("compile_glob raised re.error on an unterminated '['")
         self.assertTrue(result)
 
+    def test_invalid_character_range_does_not_raise(self):
+        # A backwards range like [9-0] or [z-a] is valid glob-class SYNTAX
+        # (a well-formed [...]) but not a valid regex range once translated,
+        # so re.compile() raises re.error/re.PatternError while COMPILING
+        # the pattern -- before .match() is ever called, and well before
+        # _find_class_end's "unterminated bracket" fallback would ever kick
+        # in. This is config.json-controlled input (migrations.protected_paths,
+        # architecture.allowed_paths), same trust boundary as the rest of
+        # this module: it must fail open (never match), never raise.
+        for bad in ["**/migrations/[9-0]*", "**/migrations/[z-a]*"]:
+            try:
+                result = c.matches_any("migrations/0001_init.py", [bad])
+            except re.error:
+                self.fail(f"compile_glob raised re.error on {bad!r}")
+            self.assertFalse(result, bad)
+
 
 class TestGlobReDoS(unittest.TestCase):
     """CRITICAL-2 (fix round 1): repeated '**/' must not backtrack catastrophically.
