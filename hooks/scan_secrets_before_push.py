@@ -70,9 +70,10 @@ SECRET_PATTERNS = [
 MAX_BYTES = 1_000_000
 
 # Task 10 -- the scanner needs a documented way out: today it blocks its
-# OWN repo (tests/test_hooks.py ships AKIAIOSFODNN7EXAMPLE as fixture data)
-# with no exit at all, and a false positive with no escape hatch is exactly
-# how a security hook gets uninstalled instead of obeyed. Two mechanisms,
+# OWN repo (tests/test_hooks.py ships AWS's own documented example access
+# key as fixture data) with no exit at all, and a false positive with no
+# escape hatch is exactly how a security hook gets uninstalled instead of
+# obeyed. Two mechanisms,
 # both scoped as narrowly as possible so the exit never becomes a trivial
 # way to hide a REAL secret:
 #   - secrets.allowlist_paths (config.json): exempts a whole tracked file
