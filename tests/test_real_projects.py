@@ -44,18 +44,33 @@ HOOK = ROOT / "hooks" / "enforce_architecture.py"
 # lock that keeps allowed_paths honest against real project trees.
 STACKS = {
     "nextjs-approuter": ["app/**", "src/**", "components/**", "lib/**",
-                         "e2e/**", "tests/**", "prisma/**", "*.config.*",
-                         "middleware.ts", "instrumentation.ts", "*.d.ts"],
-    "fastapi": ["app/**", "tests/**", "alembic/**", "scripts/**", "*.py"],
+                         "e2e/**", "tests/**", "prisma/**", "public/**",
+                         "scripts/**", "*.config.*", "middleware.ts",
+                         "instrumentation.ts", "*.d.ts"],
+    "fastapi": ["app/**", "tests/**", "alembic/**", "migrations/**",
+                "scripts/**", "*.py"],
     "flutter": ["lib/**", "test/**", "integration_test/**",
-                "test_driver/**", "tool/**"],
-    "nestjs": ["src/**", "test/**", "*.config.*", "*.ts"],
-    "astro": ["src/**", "tests/**", "*.config.*"],
+                "test_driver/**", "tool/**",
+                "android/**/build.gradle.kts", "android/**/build.gradle",
+                "android/**/settings.gradle.kts",
+                "android/**/gradle.properties",
+                "android/**/MainActivity.kt", "android/**/MainActivity.java",
+                "ios/Runner/AppDelegate.swift", "ios/Runner/Info.plist",
+                "ios/Runner/*.entitlements",
+                "macos/Runner/AppDelegate.swift",
+                "macos/Runner/MainFlutterWindow.swift",
+                "macos/Runner/Info.plist", "macos/Runner/*.entitlements",
+                "linux/runner/**", "windows/runner/**", "web/index.html"],
+    "nestjs": ["src/**", "test/**", "prisma/**", "scripts/**",
+               "*.config.*", "*.ts"],
+    "astro": ["src/**", "tests/**", "public/**", "scripts/**",
+              "*.config.*"],
     # Added beyond the original brief: every stack in the catalog that
     # declares `enforce` needs its allowed_paths locked against a real
     # tree, not just the ones with `enforce: deny`.
-    "python-cli": ["src/**", "tests/**", "*.py"],
-    "data-ml": ["src/**", "tests/**", "notebooks/**", "*.py"],
+    "python-cli": ["src/**", "tests/**", "scripts/**", "docs/**", "*.py"],
+    "data-ml": ["src/**", "tests/**", "notebooks/**", "data/**",
+                "scripts/**", "*.py"],
 }
 
 
