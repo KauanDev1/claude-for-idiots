@@ -144,60 +144,187 @@ def _translate_class(glob_class):
     return "[" + ("^" if negate else "") + body + "]"
 
 
-@lru_cache(maxsize=512)
-def compile_glob(pattern):
-    """Translate a git-style glob into an anchored regex.
+# Round 1 of this fix collapsed a run of the SAME wildcard token repeated
+# ("**/" * N). Round 2's own review then found that concatenating any two
+# *different* unrestricted-quantifier regex fragments ((?:[^/]+/)*, .*,
+# [^/]*) adjacently is exactly as prone to catastrophic backtracking as
+# repeating one, and a hand-derived per-run algebraic collapse (checking only
+# "is this run one contiguous span of wildcard characters") still missed it:
+# a pattern like `("**/" + "*") * 40` re-tokenizes (adjacent "*" characters
+# always merge greedily) into several separate `.*`/`(?:[^/]+/)*` fragments
+# chained through single-character literal separators, and THAT chain is
+# just as exponential -- a run boundary at a literal does not actually bound
+# the backtracking, because `.*` freely crosses that literal too.
+#
+# Rather than keep hunting for more regex shapes that alias to the same
+# blowup, matching is done with an explicit DP over (token index, path
+# index) instead of building one backtracking regex for the whole pattern.
+# This is the "reescrever o matcher para consumir segmento a segmento sem
+# regex" option: `re` is still used, but only to test ONE character against
+# a `[...]` class -- a fixed-width, non-quantified check that can never
+# backtrack -- never to chain multiple unbounded quantifiers together. The
+# DP is O(len(pattern) * len(path)) by construction, for ANY pattern shape,
+# with no backtracking search space to blow up in the first place.
+#
+# Both dimensions are capped as defense in depth (a config.json value or a
+# tool_input path could in principle still be very long): a pattern or path
+# longer than these is treated as "does not match" rather than paying
+# unbounded DP cost -- fail open in the same direction as the rest of this
+# module (an absurd config value stops that one rule from applying instead
+# of blocking the hook). Both ceilings are far beyond any real glob pattern
+# or project-relative path.
+MAX_GLOB_PATTERN_CHARS = 1024
+MAX_GLOB_PATH_CHARS = 4096
+
+
+class _NeverMatches:
+    """compile_glob's result for a pattern over MAX_GLOB_PATTERN_CHARS."""
+
+    __slots__ = ()
+
+    def match(self, path):
+        return False
+
+
+_NEVER_MATCHES = _NeverMatches()
+
+
+def _parse_glob_tokens(pattern):
+    """Tokenize a git-style glob into `(kind, payload)` pairs.
 
     `**/` matches zero or more leading directories, `**` crosses separators,
     `*` and `?` do not. This is what `fnmatch` gets wrong: it maps every `*`
     to `.*`, so `src/**` never matches `next.config.ts` while `**/x/**` fails
     to match a root-level `x/`. A `[...]` character class is also supported,
-    including glob-style negation `[!...]` (translated to regex `[^...]`);
-    an unterminated `[` is treated as a literal so a stray bracket never
-    raises `re.error`.
-
-    A run of consecutive identical wildcard tokens (`**/`, bare `**`, or `*`)
-    collapses to a single emitted fragment instead of one fragment per
-    token. Concatenating N copies of `(?:[^/]+/)*` (one per `**/`) is exactly
-    equivalent to a single copy -- X* concatenated with itself is still X* as
-    a language -- but the repeated nested-quantifier groups make Python's
-    backtracking engine explore exponentially many ways to split a
-    non-matching path between them. A config.json from a cloned repo is
-    attacker-controlled, so a pattern like `"**/" * 40` must stay cheap.
+    including glob-style negation `[!...]` (translated to a regex `[^...]`
+    class, compiled once here and matched against exactly one character at a
+    time); an unterminated `[` is treated as a literal so a stray bracket
+    never raises `re.error`.
     """
     pattern = pattern.strip().replace("\\", "/")
-    out, index, length = [], 0, len(pattern)
+    tokens = []
+    index, length = 0, len(pattern)
     while index < length:
         if pattern.startswith("**/", index):
-            out.append(r"(?:[^/]+/)*")
+            tokens.append(("starstar_slash", None))
             index += 3
-            while pattern.startswith("**/", index):
-                index += 3
         elif pattern.startswith("**", index):
-            out.append(r".*")
+            tokens.append(("starstar", None))
             index += 2
-            while pattern.startswith("**", index):
-                index += 2
         elif pattern[index] == "*":
-            out.append(r"[^/]*")
+            tokens.append(("star", None))
             index += 1
-            while index < length and pattern[index] == "*":
-                index += 1
         elif pattern[index] == "?":
-            out.append(r"[^/]")
+            tokens.append(("qmark", None))
             index += 1
         elif pattern[index] == "[":
             end = _find_class_end(pattern, index)
             if end is None:
-                out.append(re.escape(pattern[index]))
+                tokens.append(("lit", pattern[index]))
                 index += 1
             else:
-                out.append(_translate_class(pattern[index:end + 1]))
+                tokens.append(("class", re.compile(_translate_class(pattern[index:end + 1]))))
                 index = end + 1
         else:
-            out.append(re.escape(pattern[index]))
+            tokens.append(("lit", pattern[index]))
             index += 1
-    return re.compile("^" + "".join(out) + "$")
+    return tokens
+
+
+def _dp_match(tokens, path):
+    """Does the full `tokens` sequence match the full `path`?
+
+    Standard "wildcard matching" dynamic programming, generalized with a
+    `starstar_slash` token alongside the usual single-char/`*`/`**` ones.
+    `dp` holds, for the tokens consumed so far, every path index reachable
+    at that point; each token folds `dp` into a `new_dp` in O(len(path))
+    time, so the whole match is O(len(tokens) * len(path)) -- no
+    backtracking, so no input can make it slower than that bound.
+    """
+    n = len(path)
+    dp = [False] * (n + 1)
+    dp[0] = True
+    next_slash = None  # computed lazily, at most once, only if needed
+
+    for kind, payload in tokens:
+        if True not in dp:
+            return False  # nothing reachable -- no later token can help
+        new_dp = [False] * (n + 1)
+        if kind == "lit":
+            for j in range(1, n + 1):
+                new_dp[j] = dp[j - 1] and path[j - 1] == payload
+        elif kind == "qmark":
+            for j in range(1, n + 1):
+                new_dp[j] = dp[j - 1] and path[j - 1] != "/"
+        elif kind == "class":
+            for j in range(1, n + 1):
+                new_dp[j] = dp[j - 1] and payload.match(path[j - 1]) is not None
+        elif kind == "star":
+            # Zero-or-more non-slash characters: reachable either by taking
+            # zero reps from wherever `dp` already reached, or by extending
+            # what THIS token just reached by one more non-slash character.
+            new_dp[0] = dp[0]
+            for j in range(1, n + 1):
+                new_dp[j] = dp[j] or (new_dp[j - 1] and path[j - 1] != "/")
+        elif kind == "starstar":
+            new_dp[0] = dp[0]
+            for j in range(1, n + 1):
+                new_dp[j] = dp[j] or new_dp[j - 1]
+        else:  # starstar_slash: zero-or-more complete "[^/]+/" segments
+            if next_slash is None:
+                next_slash = [n] * (n + 1)
+                for p in range(n - 1, -1, -1):
+                    next_slash[p] = p if path[p] == "/" else next_slash[p + 1]
+            new_dp = dp[:]
+            # A segment starting at `start` is deterministic -- glob "1 or
+            # more non-slash chars then /" can only mean "up to the next
+            # literal /", there is no ambiguity in where it ends. Walking
+            # `start` in increasing order and hopping forward on each hit
+            # therefore reaches every valid rep count in one O(n) pass: any
+            # position newly marked True is still ahead of `start` (a
+            # segment is never empty), so it gets its own turn later in the
+            # same loop.
+            for start in range(n):
+                if new_dp[start] and path[start] != "/" and next_slash[start] < n:
+                    new_dp[next_slash[start] + 1] = True
+        dp = new_dp
+    return dp[n]
+
+
+class _GlobPattern:
+    """compile_glob's result for a pattern within the length cap.
+
+    `.match(path)` mirrors the truthy/falsy contract `matches_any` needs
+    from `re.Pattern.match` -- that is the only thing this module (or any
+    consumer of `compile_glob`) relies on; nothing calls `.pattern`,
+    `.fullmatch()`, or any other `re.Pattern`-specific attribute.
+    """
+
+    __slots__ = ("_tokens",)
+
+    def __init__(self, tokens):
+        self._tokens = tokens
+
+    def match(self, path):
+        if len(path) > MAX_GLOB_PATH_CHARS:
+            return False
+        return _dp_match(self._tokens, path)
+
+
+@lru_cache(maxsize=512)
+def compile_glob(pattern):
+    """Compile a git-style glob pattern for repeated matching.
+
+    Returns an object with a `.match(path) -> bool`-ish method (not a real
+    `re.Pattern` -- see `_GlobPattern` and the module-level comment above
+    `MAX_GLOB_PATTERN_CHARS` for why). Deliberately not `@lru_cache`d on the
+    (pattern, path) pair: patterns repeat across hook invocations (there are
+    only ever a handful per project), paths don't, so caching the parse
+    here and reusing it across `.match()` calls is what actually pays off.
+    """
+    if len(pattern) > MAX_GLOB_PATTERN_CHARS:
+        return _NEVER_MATCHES
+    return _GlobPattern(_parse_glob_tokens(pattern))
 
 
 def matches_any(rel_path, patterns):
