@@ -643,6 +643,11 @@ class TestPublishDetection(TempProject):
         "scp -r . user@host:/srv", "rsync -av . user@host:/srv",
         "aws s3 sync . s3://bucket",
         "cd app && git push",
+        # Task-9b review, "Important": eleven-command audit missed these too.
+        "docker compose push", "docker-compose push",
+        "helm push chart.tgz oci://registry.example.com/charts",
+        "aws s3api put-object --bucket b --key k --body f",
+        "gcloud run deploy svc --image=img",
     ]
     IGNORES = [
         "ls -la", "git status", "git commit -m 'x'", "git log --oneline",
@@ -654,7 +659,20 @@ class TestPublishDetection(TempProject):
         'git commit -m "add push notification support"',
         "git commit -m 'remember to npm publish next week'",
         'git commit -m "docker push once CI is green"',
+        # Task-9b review, "Important": these commands never actually publish.
+        "cargo publish --dry-run", "npm publish --dry-run",
+        # Task-9b review, "Important": escaped quotes inside a -m message
+        # must not close quote-tracking early and re-expose "push" as if it
+        # sat outside the message. The docstring's claim -- suppress only,
+        # never fabricate -- must hold even with escaped quotes present.
+        'git commit -m "rename \\"push\\" button"',
     ]
+
+    # Task-9b review, Important: registries that support --dry-run must not
+    # be blocked when a push genuinely can't happen. Every registry in
+    # PUBLISH_RE's group, not just the two PoCs (cargo, npm) the review
+    # happened to demonstrate -- this is the property, not the PoC.
+    REGISTRIES = ["npm", "pnpm", "yarn", "bun", "poetry", "cargo", "flit"]
 
     def _repo_with_secret(self):
         subprocess.run(["git", "-C", self.root, "init", "-q"],
@@ -677,6 +695,190 @@ class TestPublishDetection(TempProject):
                    if decision(run_hook("scan_secrets_before_push.py",
                                         self.event("Bash", command=c))) is not None]
         self.assertEqual(blocked, [], "falsos positivos: " + str(blocked))
+
+    def test_dry_run_never_blocks_any_registry_publish(self):
+        # Property: for every registry `X publish` recognizes, appending
+        # --dry-run must flip the decision from deny to allow, because a
+        # dry run never sends anything anywhere.
+        self._repo_with_secret()
+        still_blocked = []
+        for registry in self.REGISTRIES:
+            proc = run_hook("scan_secrets_before_push.py",
+                            self.event("Bash", command=f"{registry} publish --dry-run"))
+            if decision(proc) is not None:
+                still_blocked.append(registry)
+        self.assertEqual(still_blocked, [],
+                         "--dry-run não suprimiu o bloqueio para: " + str(still_blocked))
+
+    def test_dry_run_does_not_suppress_a_real_publish_in_a_different_clause(self):
+        # --dry-run must only cancel the match in ITS OWN clause -- a real
+        # publish chained alongside a dry-run of something else must still
+        # block.
+        self._repo_with_secret()
+        proc = run_hook("scan_secrets_before_push.py", self.event(
+            "Bash", command="npm publish --dry-run && cargo publish"))
+        self.assertEqual(decision(proc), "deny")
+
+
+class TestExecWrapperCannotHideAPublish(TempProject):
+    """Task-9b review, CRITICAL 1: `blank_quoted` used to erase the CONTENTS
+    of every quoted span unconditionally -- including when that quoted span
+    IS the command actually being run (`bash -c "..."`, `sh -c '...'`,
+    `ssh host "..."`, `eval "..."`). That blanked the publish command clean
+    out of the text before PUBLISH_RE ever saw it: a real `git push`/`npm
+    publish`/etc. wrapped in any of these sailed straight through.
+
+    Tests the PROPERTY -- every publish-shaped command, wrapped in every
+    known shell-invoking construct, in either quote style -- rather than
+    just the five PoC lines from the review, so a fix that closes only
+    those five specific strings (and leaves the underlying "blank every
+    quote indiscriminately" bug alive) still fails this suite.
+    """
+    SCRIPT = "scan_secrets_before_push.py"
+
+    WRAPPERS = [
+        'bash -c {q}{inner}{q}',
+        'sh -c {q}{inner}{q}',
+        'zsh -c {q}{inner}{q}',
+        'ssh user@host {q}{inner}{q}',
+        'eval {q}{inner}{q}',
+    ]
+    INNER_PUBLISH_COMMANDS = [
+        "git push origin main",
+        "npm publish",
+        "docker push myreg/app:v1",
+        "vercel --prod",
+        "scp -r . user@host:/srv",
+    ]
+
+    def _repo_with_secret(self):
+        subprocess.run(["git", "-C", self.root, "init", "-q"],
+                       check=True, capture_output=True)
+        (Path(self.root) / "leak.py").write_text(
+            'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        subprocess.run(["git", "-C", self.root, "add", "-A"],
+                       check=True, capture_output=True)
+
+    def test_every_wrapper_around_every_publish_command_still_blocks(self):
+        self._repo_with_secret()
+        missed = []
+        for wrapper in self.WRAPPERS:
+            for inner in self.INNER_PUBLISH_COMMANDS:
+                for q in ("'", '"'):
+                    cmd = wrapper.format(q=q, inner=inner)
+                    proc = run_hook(self.SCRIPT, self.event("Bash", command=cmd))
+                    if decision(proc) != "deny":
+                        missed.append(cmd)
+        self.assertEqual(missed, [], "bypassou o wrapper: " + str(missed))
+
+    def test_a_non_publish_command_inside_a_wrapper_still_allows(self):
+        # The fix must not degrade into "any quoted content is now
+        # dangerous" -- an innocuous command inside the exact same wrappers
+        # must still be allowed.
+        self._repo_with_secret()
+        blocked = []
+        for wrapper in self.WRAPPERS:
+            cmd = wrapper.format(q='"', inner="echo hello && ls -la")
+            proc = run_hook(self.SCRIPT, self.event("Bash", command=cmd))
+            if decision(proc) is not None:
+                blocked.append(cmd)
+        self.assertEqual(blocked, [], "falso positivo dentro do wrapper: " + str(blocked))
+
+    def test_a_two_level_nested_wrapper_still_blocks(self):
+        # Not just one level of unwrapping -- a publish command wrapped
+        # twice (a common CI/deploy-script shape: ssh into a box, which
+        # itself runs bash -c) must still be caught.
+        self._repo_with_secret()
+        cmd = """bash -c "ssh user@host 'git push origin main'\""""
+        proc = run_hook(self.SCRIPT, self.event("Bash", command=cmd))
+        self.assertEqual(decision(proc), "deny")
+
+    def test_a_commit_message_merely_describing_a_wrapper_still_allows(self):
+        # Prose that happens to LOOK like an exec wrapper, sitting inside a
+        # real -m message, must stay suppressed -- the fix must keep telling
+        # "this text IS the command" apart from "this text MENTIONS a
+        # command", not just for git push/publish words but for the
+        # wrapper syntax itself.
+        self._repo_with_secret()
+        proc = run_hook(self.SCRIPT, self.event(
+            "Bash", command='git commit -m "document how bash -c \\"git push\\" works"'))
+        self.assertIsNone(decision(proc))
+
+    def test_a_message_nested_inside_a_wrapper_still_allows(self):
+        # Recursion must re-apply message-flag blanking at every level, not
+        # just treat everything inside an exec wrapper as raw text to
+        # scan -- a commit made *through* a wrapper, whose own message
+        # merely mentions a publish word, must not block.
+        self._repo_with_secret()
+        cmd = """bash -c "git commit -m 'remember to npm publish next week'\""""
+        proc = run_hook(self.SCRIPT, self.event("Bash", command=cmd))
+        self.assertIsNone(decision(proc))
+
+
+class TestPublishRegexTimeBudget(unittest.TestCase):
+    """Task-9b review, CRITICAL 2 (plus the coordinator's addendum): two
+    independent constructs in this file cost O(n^2) when their trigger word
+    repeats and the thing it's looking for never shows up --
+
+    1. Each alternative in `\\b(?:vercel|netlify|firebase|flyctl|fly|surge|
+       amplify)\\b(?=[^|;&]*(?:deploy|publish|--prod))` re-scans to the end
+       of the string from EVERY occurrence of the trigger word.
+    2. `GIT_PUSH_RE = \\bgit\\b[^|;&]*?\\bpush\\b` does the same thing via
+       its lazy gap -- this is a second, independent mechanism, not the
+       same lookahead, so fixing only the vercel/netlify alternative would
+       leave this bug class alive.
+
+    Both are ordinary English/devops words ("fly", "git", "surge") that
+    show up at scale in heredocs, CI logs, and generated scripts without
+    anyone attacking anything. This asserts a time BUDGET, not a single
+    point measurement, over every trigger word in both mechanisms, so a fix
+    that special-cases one word (or one mechanism) and leaves the general
+    pattern quadratic still fails.
+    """
+    HOSTING_TRIGGERS = ["vercel", "netlify", "firebase", "flyctl", "fly",
+                        "surge", "amplify"]
+    REPEAT_COUNT = 20_000
+    BUDGET_SECONDS = 5.0
+
+    def _time_allow(self, command):
+        proc = run_hook("scan_secrets_before_push.py",
+                        {"cwd": tempfile.mkdtemp(), "tool_name": "Bash",
+                         "tool_input": {"command": command}})
+        return proc
+
+    def test_hosting_trigger_words_never_blow_up_when_the_target_is_absent(self):
+        slow = []
+        for trigger in self.HOSTING_TRIGGERS:
+            command = (trigger + " ") * self.REPEAT_COUNT
+            start = time.time()
+            proc = self._time_allow(command)
+            elapsed = time.time() - start
+            self.assertIsNone(decision(proc))  # never deploy/publish/--prod
+            if elapsed > self.BUDGET_SECONDS:
+                slow.append((trigger, round(elapsed, 2)))
+        self.assertEqual(slow, [], "estourou o orçamento de tempo: " + str(slow))
+
+    def test_git_word_never_blows_up_when_push_is_absent(self):
+        command = ("git status; " * self.REPEAT_COUNT)
+        start = time.time()
+        proc = self._time_allow(command)
+        elapsed = time.time() - start
+        self.assertIsNone(decision(proc))
+        self.assertLessEqual(elapsed, self.BUDGET_SECONDS,
+                             f"git-word scan took {elapsed:.2f}s")
+
+    def test_a_multi_megabyte_command_still_completes_quickly(self):
+        # Defense in depth: even with the quadratic behavior fixed, an
+        # unbounded command has no legitimate reason to cost real hook
+        # time. A several-MB pathological command (trigger word repeated,
+        # target never present) must still return well inside budget.
+        command = ("fly " * 400_000)  # ~2MB
+        start = time.time()
+        proc = self._time_allow(command)
+        elapsed = time.time() - start
+        self.assertIsNone(decision(proc))
+        self.assertLessEqual(elapsed, self.BUDGET_SECONDS,
+                             f"multi-MB command took {elapsed:.2f}s")
 
 
 class TestMigrationPatterns(TempProject):
