@@ -117,7 +117,12 @@ def main():
     if os.path.exists(os.path.join(cwd, rel)):
         cfi.allow()
 
-    if cfi.matches_any(rel, allowed):
+    # on_incomplete=True: this hook ALLOWS on a match, so an allowed_paths
+    # list too expensive to fully evaluate (see matches_any's docstring)
+    # must fail open the same direction as everything else here -- allow,
+    # not deny/ask. Without this, an absurd config would turn "the safety
+    # net degrades" into "legitimate writes start getting denied".
+    if cfi.matches_any(rel, allowed, on_incomplete=True):
         cfi.allow()
 
     layers = arch.get("layers") or {}
@@ -134,4 +139,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Last-resort net -- see block_migration_edits.py for the rationale
+        # (this codebase has already found three distinct fail-open gaps of
+        # this same shape across the three hooks). Never catches the
+        # SystemExit that cfi.allow()/cfi.decide() raise.
+        sys.exit(0)

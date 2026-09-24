@@ -45,4 +45,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Last-resort net, not a substitute for fixing each cause: this
+        # execution alone found three separate ways attacker/tool-influenced
+        # input reached an uncaught exception (RecursionError parsing JSON,
+        # re.error compiling a config glob, TypeError on a non-string
+        # command) -- three instances of the SAME invariant violation this
+        # module exists to prevent. Every known boundary already fails open
+        # on its own; this is the backstop for the next one nobody has found
+        # yet. `except Exception` does not catch the `SystemExit` that
+        # `cfi.allow()`/`cfi.decide()` raise (SystemExit subclasses
+        # BaseException, not Exception), so the normal exit paths are
+        # unaffected -- this only ever fires for a genuinely unanticipated
+        # failure.
+        sys.exit(0)
