@@ -50,6 +50,13 @@ def decision(proc):
     return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"]
 
 
+def reason(proc):
+    """The permissionDecisionReason the hook printed, or "" if it stayed silent."""
+    if not proc.stdout.strip():
+        return ""
+    return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
 class TempProject(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -328,6 +335,66 @@ class TestScanSecretsBeforePush(TempProject):
 
     def test_ignores_other_tools(self):
         proc = run_hook(self.SCRIPT, self.event("Edit", file_path="x.py"))
+        self.assertIsNone(decision(proc))
+
+    def test_blocks_push_when_secret_lives_in_a_non_ascii_named_file(self):
+        # git ls-files quotes any path containing a non-ASCII byte as an
+        # octal-escaped string by default (core.quotePath=true). If the
+        # scanner ever uses that quoted string as a literal filesystem path
+        # again, open() raises OSError and the file is skipped in silence --
+        # so a secret sitting in a file like "serviço/júlia's config.py"
+        # would sail through undetected. This must still be caught.
+        self._repo_with("serviço/júlia's config.py",
+                         'GOOGLE_KEY = "AIzaSyD-1234567890abcdefghijklmnopqrstu"\n')
+        proc = run_hook(self.SCRIPT, self.event("Bash", command="git push origin main"))
+        self.assertEqual(decision(proc), "deny")
+        self.assertIn("serviço", reason(proc))
+
+    def test_non_ascii_named_file_without_a_secret_still_allows(self):
+        # The fix must actually read the content of non-ASCII-named files,
+        # not just fail differently on them -- a scanner that denies every
+        # push touching a non-ASCII path (instead of reading it) would pass
+        # the sibling test above for the wrong reason.
+        self._repo_with("dados/relatório (março).py", "print('sem segredo aqui')\n")
+        proc = run_hook(self.SCRIPT, self.event("Bash", command="git push origin main"))
+        self.assertIsNone(decision(proc))
+
+    def test_scan_covers_the_whole_repo_regardless_of_cwd(self):
+        # `git push` sends the whole repository, not just the subtree under
+        # the directory the command happened to run from. A secret sitting
+        # outside the invoking cwd must still be caught.
+        self._repo_with("ci/deploy_keys.py",
+                         "SLACK_TOKEN = 'xoxb-111111111111-222222222222-abcdefghijklmnopqrstuvwx'\n")
+        nested = Path(self.root) / "packages" / "web" / "src"
+        nested.mkdir(parents=True)
+        (nested / "index.js").write_text("console.log('hi')\n")
+        subprocess.run(["git", "-C", self.root, "add", "-A"],
+                       check=True, capture_output=True)
+        event = {
+            "cwd": str(nested),
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push origin main"},
+        }
+        proc = run_hook(self.SCRIPT, event)
+        self.assertEqual(decision(proc), "deny")
+        self.assertIn("ci/deploy_keys.py", reason(proc))
+
+    def test_scan_from_nested_cwd_still_allows_a_genuinely_clean_repo(self):
+        # Root-relative scanning must not become "deny everything from a
+        # subdirectory" -- a clean repo pushed from deep inside it should
+        # still pass.
+        self._repo_with("ci/build.py", "print('build step')\n")
+        nested = Path(self.root) / "packages" / "web" / "src"
+        nested.mkdir(parents=True)
+        (nested / "index.js").write_text("console.log('hi')\n")
+        subprocess.run(["git", "-C", self.root, "add", "-A"],
+                       check=True, capture_output=True)
+        event = {
+            "cwd": str(nested),
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push origin main"},
+        }
+        proc = run_hook(self.SCRIPT, event)
         self.assertIsNone(decision(proc))
 
 
