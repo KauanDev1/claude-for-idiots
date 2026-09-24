@@ -1,4 +1,4 @@
-import re, sys, unittest
+import io, re, sys, time, unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
@@ -43,7 +43,89 @@ class TestCharacterClass(unittest.TestCase):
         self.assertTrue(result)
 
 
+class TestGlobReDoS(unittest.TestCase):
+    """CRITICAL-2 (fix round 1): repeated '**/' must not backtrack catastrophically.
+
+    `(?:[^/]+/)*` emitted once per '**/' token concatenates into nested,
+    overlapping quantifiers when the pattern repeats the token, which blows
+    up exponentially on a non-matching path. A fixed implementation collapses
+    the repeated token before translating, so this must stay well under a
+    generous ceiling even though an unpatched version does not finish in
+    under two minutes for the same input.
+    """
+
+    def test_repeated_doublestar_slash_does_not_backtrack_catastrophically(self):
+        pattern = "**/" * 40 + "nomatch_never"
+        rel_path = "a/" * 40 + "nomatch"
+        start = time.monotonic()
+        result = c.matches_any(rel_path, [pattern])
+        elapsed = time.monotonic() - start
+        self.assertFalse(result)
+        self.assertLess(elapsed, 2.0, f"compile_glob took {elapsed:.2f}s -- ReDoS regression")
+
+    def test_repeated_bare_doublestar_does_not_backtrack_catastrophically(self):
+        pattern = "**" * 40 + "nomatch_never"
+        rel_path = "a" * 80 + "nomatch"
+        start = time.monotonic()
+        result = c.matches_any(rel_path, [pattern])
+        elapsed = time.monotonic() - start
+        self.assertFalse(result)
+        self.assertLess(elapsed, 2.0, f"compile_glob took {elapsed:.2f}s -- ReDoS regression")
+
+    def test_repeated_star_does_not_backtrack_catastrophically(self):
+        pattern = "*" * 60 + "nomatch_never"
+        rel_path = "a" * 80 + "nomatch"
+        start = time.monotonic()
+        result = c.matches_any(rel_path, [pattern])
+        elapsed = time.monotonic() - start
+        self.assertFalse(result)
+        self.assertLess(elapsed, 2.0, f"compile_glob took {elapsed:.2f}s -- ReDoS regression")
+
+    def test_collapsed_doublestar_slash_still_matches_correctly(self):
+        # Collapsing repeated '**/' must not change matching semantics.
+        self.assertTrue(c.matches_any("app/db/migrations/0001.py",
+                                       ["**/**/migrations/**"]))
+        self.assertFalse(c.matches_any("app/db/migrations", ["**/**/x/**"]))
+
+
+class TestReadEventDefensiveParsing(unittest.TestCase):
+    """CRITICAL-1 (fix round 1): a pathologically nested JSON payload must
+    fail open (return None), not crash the hook with RecursionError."""
+
+    def test_deeply_nested_stdin_fails_open(self):
+        payload = "[" * 60000 + "]" * 60000
+        old_stdin = sys.stdin
+        sys.stdin = io.StringIO(payload)
+        try:
+            start = time.monotonic()
+            result = c.read_event()
+            elapsed = time.monotonic() - start
+        finally:
+            sys.stdin = old_stdin
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 5.0)
+
+    def test_deeply_nested_config_fails_open(self, tmp_path=None):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_dir = Path(tmp) / ".claude-for-idiots"
+            cfg_dir.mkdir()
+            payload = "[" * 60000 + "]" * 60000
+            (cfg_dir / "config.json").write_text(payload)
+            start = time.monotonic()
+            result = c.load_config(tmp)
+            elapsed = time.monotonic() - start
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 5.0)
+
+
 class TestRelativize(unittest.TestCase):
+    def test_dot_dot_returns_none(self):
+        self.assertIsNone(c.relativize("..", "/proj"))
+
+    def test_traversal_back_to_project_root_returns_none(self):
+        self.assertIsNone(c.relativize("sub/../..", "/proj"))
+
     def test_strips_dot_segments(self):
         self.assertEqual(c.relativize("./alembic/./versions/a.py", "/proj"),
                          "alembic/versions/a.py")

@@ -13,13 +13,75 @@ from functools import lru_cache
 
 CONFIG_REL = os.path.join(".claude-for-idiots", "config.json")
 
+# Both are attacker-influenced: the event comes over stdin from whatever
+# invoked the hook, and config.json can come from a repo the user cloned.
+# MAX_JSON_CHARS bounds parse time/memory on a pathologically large payload;
+# MAX_JSON_NESTING bounds recursion depth so CPython's recursive-descent
+# decoder can never be pushed toward (or past) a RecursionError/C-stack
+# overflow in the first place. Both are far beyond any real PreToolUse event.
+MAX_JSON_CHARS = 2_000_000
+MAX_JSON_NESTING = 200
+
+
+def _max_nesting_depth(raw):
+    """Greatest `[`/`{` nesting depth in `raw`, ignoring string content.
+
+    Iterative, not recursive, so scanning itself can never overflow the
+    stack. Used to reject dangerously nested input before it ever reaches
+    `json.loads`, since the stdlib decoder recurses once per nesting level.
+    """
+    depth = 0
+    max_depth = 0
+    in_string = False
+    escape = False
+    for ch in raw:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > max_depth:
+                max_depth = depth
+        elif ch in "]}":
+            depth -= 1
+    return max_depth
+
+
+def _safe_json_loads(raw):
+    """Parse JSON defensively. None on ANY problem -- fail open, always.
+
+    Bounds size and nesting before parsing, then wraps the parse itself in a
+    broad `except Exception`. That breadth is deliberate here, not a stray
+    catch-all: this is the one boundary where attacker-controlled bytes
+    (stdin, or config.json from a cloned repo) turn into Python objects, and
+    the project's invariant is that no hook may ever exit non-zero, on any
+    input. RecursionError (raised by the decoder on deep-but-not-rejected
+    nesting) is an Exception subclass, so it is covered without special-casing.
+    """
+    if not raw or len(raw) > MAX_JSON_CHARS:
+        return None
+    if _max_nesting_depth(raw) > MAX_JSON_NESTING:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
 
 def read_event():
     """Parse the PreToolUse event from stdin. None means: fail open."""
     try:
-        event = json.load(sys.stdin)
-    except (ValueError, UnicodeDecodeError):
+        raw = sys.stdin.read(MAX_JSON_CHARS + 1)
+    except (OSError, ValueError, UnicodeDecodeError):
         return None
+    event = _safe_json_loads(raw)
     return event if isinstance(event, dict) else None
 
 
@@ -27,9 +89,10 @@ def load_config(cwd):
     """Read the project config. None means: fail open."""
     try:
         with open(os.path.join(cwd, CONFIG_REL), encoding="utf-8") as handle:
-            config = json.load(handle)
+            raw = handle.read(MAX_JSON_CHARS + 1)
     except (OSError, ValueError, UnicodeDecodeError):
         return None
+    config = _safe_json_loads(raw)
     return config if isinstance(config, dict) else None
 
 
@@ -92,6 +155,15 @@ def compile_glob(pattern):
     including glob-style negation `[!...]` (translated to regex `[^...]`);
     an unterminated `[` is treated as a literal so a stray bracket never
     raises `re.error`.
+
+    A run of consecutive identical wildcard tokens (`**/`, bare `**`, or `*`)
+    collapses to a single emitted fragment instead of one fragment per
+    token. Concatenating N copies of `(?:[^/]+/)*` (one per `**/`) is exactly
+    equivalent to a single copy -- X* concatenated with itself is still X* as
+    a language -- but the repeated nested-quantifier groups make Python's
+    backtracking engine explore exponentially many ways to split a
+    non-matching path between them. A config.json from a cloned repo is
+    attacker-controlled, so a pattern like `"**/" * 40` must stay cheap.
     """
     pattern = pattern.strip().replace("\\", "/")
     out, index, length = [], 0, len(pattern)
@@ -99,12 +171,18 @@ def compile_glob(pattern):
         if pattern.startswith("**/", index):
             out.append(r"(?:[^/]+/)*")
             index += 3
+            while pattern.startswith("**/", index):
+                index += 3
         elif pattern.startswith("**", index):
             out.append(r".*")
             index += 2
+            while pattern.startswith("**", index):
+                index += 2
         elif pattern[index] == "*":
             out.append(r"[^/]*")
             index += 1
+            while index < length and pattern[index] == "*":
+                index += 1
         elif pattern[index] == "?":
             out.append(r"[^/]")
             index += 1
@@ -139,7 +217,7 @@ def relativize(file_path, cwd):
         except ValueError:
             return None
     rel = posixpath.normpath(raw)
-    if rel in (".", "") or rel.startswith("../"):
+    if rel in (".", "..", "") or rel.startswith("../"):
         return None
     return rel
 
