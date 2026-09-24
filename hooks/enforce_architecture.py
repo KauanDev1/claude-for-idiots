@@ -13,10 +13,29 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cfi_common as cfi
 
-CODE_EXT = {
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".kt",
-    ".rb", ".php", ".dart", ".vue", ".svelte", ".cs", ".swift", ".scala",
+# Inverted on purpose: policing an allow-list of extensions silently exempted
+# .mjs/.cjs/.astro/.sql/.sh, so Rule 5 did not apply to whole stacks the
+# catalog recommends. Anything that is not obviously prose, data or a binary
+# is treated as code.
+IGNORED_EXT = {
+    ".md", ".markdown", ".rst", ".txt", ".adoc",
+    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".lock", ".csv", ".tsv", ".xml", ".env", ".example", ".sample",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".pdf", ".zip", ".gz", ".tar", ".mp3", ".mp4", ".webm",
 }
+
+
+def is_policed(rel, arch):
+    """True when this file counts as code for Rule 5."""
+    _, ext = os.path.splitext(rel)
+    if not ext:
+        # No extension: LICENSE, Dockerfile, Makefile. Too noisy to police.
+        return False
+    override = cfi.str_list(arch.get("ignored_extensions"))
+    ignored = set(override) if override else IGNORED_EXT
+    return ext.lower() not in ignored
 
 
 def main():
@@ -41,8 +60,7 @@ def main():
         cfi.allow()
 
     # Only police new code files. Let docs/config and edits-to-existing through.
-    _, ext = os.path.splitext(rel)
-    if ext.lower() not in CODE_EXT:
+    if not is_policed(rel, arch):
         cfi.allow()
 
     # An existing file is an edit, not a placement. Resolve against the

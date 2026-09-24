@@ -144,6 +144,34 @@ class TestEnforceArchitecture(TempProject):
         self.assertIsNone(decision(proc))
 
 
+class TestPolicedExtensions(TempProject):
+    POLICED = ["x.ts", "x.mjs", "x.cjs", "x.mts", "x.astro", "x.sql",
+               "x.sh", "x.py", "x.go", "x.rs", "x.vue"]
+    IGNORED = ["notes.md", "data.json", "config.yml", "Cargo.lock", "logo.svg"]
+
+    def test_every_code_extension_is_policed(self):
+        self.write_config(ARCH_CONFIG)
+        for name in self.POLICED:
+            proc = run_hook("enforce_architecture.py", self.event(
+                "Write", file_path=os.path.join(self.root, "random", name)))
+            self.assertEqual(decision(proc), "deny", name)
+
+    def test_non_code_is_never_policed(self):
+        self.write_config(ARCH_CONFIG)
+        for name in self.IGNORED:
+            proc = run_hook("enforce_architecture.py", self.event(
+                "Write", file_path=os.path.join(self.root, "random", name)))
+            self.assertIsNone(decision(proc), name)
+
+    def test_config_can_override_the_ignore_list(self):
+        cfg = json.loads(json.dumps(ARCH_CONFIG))
+        cfg["architecture"]["ignored_extensions"] = [".ts"]
+        self.write_config(cfg)
+        proc = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, "random", "x.ts")))
+        self.assertIsNone(decision(proc))
+
+
 class TestScanSecretsBeforePush(TempProject):
     SCRIPT = "scan_secrets_before_push.py"
 
