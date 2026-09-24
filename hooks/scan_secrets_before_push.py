@@ -13,8 +13,10 @@ This is a deliberately simple, extendable scanner — add patterns as needed.
 """
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cfi_common as cfi
@@ -66,6 +68,154 @@ SECRET_PATTERNS = [
 ]
 
 MAX_BYTES = 1_000_000
+
+# Task 10 -- the scanner needs a documented way out: today it blocks its
+# OWN repo (tests/test_hooks.py ships AKIAIOSFODNN7EXAMPLE as fixture data)
+# with no exit at all, and a false positive with no escape hatch is exactly
+# how a security hook gets uninstalled instead of obeyed. Two mechanisms,
+# both scoped as narrowly as possible so the exit never becomes a trivial
+# way to hide a REAL secret:
+#   - secrets.allowlist_paths (config.json): exempts a whole tracked file
+#     by path, same glob semantics (and same non-backtracking matches_any
+#     budget) every other *_paths field in this project already uses.
+#   - secrets.allow_patterns (config.json) + the inline `# cfi:allow-secret`
+#     pragma: exempt one LINE of content, so a fixture sitting outside an
+#     allowlisted path (or a one-off documented example) can still be
+#     marked, explicitly and visibly, without hiding it from a reviewer.
+# Neither mechanism touches PUBLISH_RE, GIT_PUSH_RE or blank_quoted() --
+# both operate purely on tracked-file content and paths, never on the
+# command string.
+ALLOW_PRAGMA = "cfi:allow-secret"
+
+# Length cap on a single `secrets.allow_patterns` entry before it is even
+# compiled -- mirrors _cfi_common.MAX_GLOB_PATTERN_CHARS's reasoning:
+# config.json is third-party input (a repo the user cloned), same as
+# everything else this project bounds, and an absurdly long pattern string
+# costs real time to compile for no realistic benefit (a secret-allowlist
+# pattern is always a short literal or a small regex).
+MAX_ALLOW_PATTERN_CHARS = 512
+
+# Length cap on the LINE tested against allow_patterns. Unlike
+# compile_glob (a hand-rolled DP with no backtracking by construction),
+# there is no backtracking-free way to run an arbitrary operator-supplied
+# regex -- Python's stdlib `re` has no non-backtracking engine and no way
+# to bound a single call's cost from the outside. A classic ReDoS shape
+# (e.g. `(a+)+$`) against a long line can still be catastrophic. Capping
+# the candidate line's length is real, if partial, defense in depth: it
+# bounds how much text even reaches re.search(), and a line over the cap
+# is simply treated as NOT exempt -- the safe direction, since skipping an
+# allow_pattern check only ever means MORE scanning happens, never less.
+MAX_ALLOW_PATTERN_LINE_CHARS = 2000
+
+# Aggregate wall-clock ceiling on ALL allow_pattern matching across a
+# single hook invocation (every tracked file's lines, plus the unpushed-
+# history diff's lines) -- the "bound the TOTAL, not just one call"
+# philosophy _cfi_common.MAX_GLOB_MATCH_WORK already applies to glob
+# matching, adapted to wall-clock time because arbitrary regex has no
+# "cells" unit to pre-cost the way a glob DP does. Enforced two ways:
+#   1. Checked before every line: once the deadline has passed, every
+#      remaining line is treated as not-exempt without even attempting a
+#      match (cheap, catches "many moderately expensive patterns x many
+#      lines" adding up).
+#   2. Each individual re.search() call is itself wall-clock-bounded to
+#      whatever budget remains, via SIGALRM where the platform provides it
+#      (every POSIX target this project documents: Linux, macOS) -- see
+#      _match_within_budget. This is what actually stops a SINGLE
+#      catastrophic-backtracking call already in flight; (1) alone cannot,
+#      since nothing checks time again until that call returns.
+# On a platform without SIGALRM (Windows), only (1) and
+# MAX_ALLOW_PATTERN_LINE_CHARS apply -- a short, deliberately pathological
+# pattern there is a real, accepted residual risk: secrets.allow_patterns
+# is a narrow, opt-in field a project owner adds through the onboarding
+# skill, not attacker-controlled input arriving over stdin the way the
+# PreToolUse event itself is, and unlike protected_paths/allowed_paths
+# (evaluated on every single Edit/Write), it only ever runs at publish time.
+ALLOW_PATTERN_TIME_BUDGET = 5.0
+
+_HAS_SIGALRM = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
+
+
+class _AllowPatternTimeout(Exception):
+    """Raised by _match_within_budget's SIGALRM handler. Never escapes
+    that function -- it only aborts the ONE re.search() call in flight."""
+
+
+def _raise_allow_pattern_timeout(signum, frame):
+    raise _AllowPatternTimeout()
+
+
+def _match_within_budget(pattern, line, deadline):
+    """`pattern.search(line)`, wall-clock-bounded by `deadline` (an
+    absolute time.monotonic() value shared across this whole invocation's
+    allow_pattern matching). None the instant the budget is already spent,
+    or the moment it gets spent mid-call -- treated by the caller exactly
+    like "did not match" (not exempt), the safe fail-open direction.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    if not _HAS_SIGALRM:
+        # Best effort only where the platform gives no way to interrupt a
+        # call already in progress -- see ALLOW_PATTERN_TIME_BUDGET above.
+        return pattern.search(line)
+    old_handler = signal.signal(signal.SIGALRM, _raise_allow_pattern_timeout)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+        try:
+            return pattern.search(line)
+        except _AllowPatternTimeout:
+            return None
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+def _compile_allow_patterns(raw_patterns):
+    """Compile secrets.allow_patterns entries, skipping (never raising on)
+    anything too long or not a valid regex -- fail open per-pattern, same
+    direction as _cfi_common._compile_class: a malformed or hostile entry
+    in config.json must never crash the hook, it just exempts nothing."""
+    compiled = []
+    for raw in raw_patterns:
+        if len(raw) > MAX_ALLOW_PATTERN_CHARS:
+            continue
+        try:
+            compiled.append(re.compile(raw))
+        except re.error:
+            continue
+    return compiled
+
+
+def _line_is_exempt(line, allow_patterns, deadline):
+    """True when `line` should be skipped from SECRET_PATTERNS scanning:
+    it carries the inline cfi:allow-secret pragma, or matches one of the
+    operator-supplied secrets.allow_patterns entries."""
+    if ALLOW_PRAGMA in line:
+        return True
+    if not allow_patterns or len(line) > MAX_ALLOW_PATTERN_LINE_CHARS:
+        return False
+    for pattern in allow_patterns:
+        if _match_within_budget(pattern, line, deadline) is not None:
+            return True
+    return False
+
+
+def _first_secret(text, allow_patterns, deadline):
+    """Label of the first SECRET_PATTERNS hit in `text`, scanning line by
+    line so a line carrying the pragma or matching an allow pattern can be
+    exempted individually. None of SECRET_PATTERNS spans multiple lines
+    (all are single-line signatures: a marker, a key=value assignment, a
+    token), so line-by-line scanning finds exactly what whole-text search
+    found before -- just with per-line granularity available for the
+    pragma. None when nothing (non-exempt) matches.
+    """
+    for line in text.splitlines():
+        if _line_is_exempt(line, allow_patterns, deadline):
+            continue
+        for label, pattern in SECRET_PATTERNS:
+            if pattern.search(line):
+                return label
+    return None
 
 
 def _git_env():
@@ -295,7 +445,26 @@ def main():
     root = repo_root(cwd) or cwd
     findings = []
 
+    # Task 10's escape hatch, read from the SAME root every tracked-file
+    # path below is resolved against (not `cwd` -- a monorepo push invoked
+    # from a nested package must still honor a project-root config.json,
+    # exactly like tracked_files/env_files_on_disk already cover the whole
+    # repo regardless of invocation cwd).
+    secrets_cfg = cfi.section(cfi.load_config(root) or {}, "secrets")
+    allowed_paths = cfi.str_list(secrets_cfg.get("allowlist_paths"))
+    allow_patterns = _compile_allow_patterns(
+        cfi.str_list(secrets_cfg.get("allow_patterns")))
+    allow_pattern_deadline = time.monotonic() + ALLOW_PATTERN_TIME_BUDGET
+
     for rel in tracked_files(root):
+        if cfi.matches_any(rel, allowed_paths):
+            # allowlist_paths exempts the WHOLE file -- both the tracked-
+            # .env heuristic below and the content scan -- not just a
+            # single line. matches_any's own aggregate work budget already
+            # keeps an absurd allowlist_paths list from stalling this loop
+            # (on_incomplete defaults to False: an unevaluated tail never
+            # manufactures a skip, the safe direction for an ALLOWLIST).
+            continue
         base = os.path.basename(rel)
         if base == ".env" or (base.startswith(".env.") and not base.endswith(".example")):
             findings.append(f"{rel}: tracked .env file (should be gitignored)")
@@ -307,10 +476,9 @@ def main():
                 text = f.read()
         except OSError:
             continue
-        for label, pattern in SECRET_PATTERNS:
-            if pattern.search(text):
-                findings.append(f"{rel}: {label}")
-                break
+        label = _first_secret(text, allow_patterns, allow_pattern_deadline)
+        if label:
+            findings.append(f"{rel}: {label}")
 
     # A gitignored .env is never sent by `git push` -- that is what
     # gitignored means -- but every OTHER publishing path (vercel, netlify,
@@ -329,10 +497,9 @@ def main():
     # `.git` is excluded by every one of their own default ignore rules).
     if is_git_push:
         history = unpushed_diff(root)
-        for label, pattern in SECRET_PATTERNS:
-            if pattern.search(history):
-                findings.append("git history (unpushed commits): " + label)
-                break
+        label = _first_secret(history, allow_patterns, allow_pattern_deadline)
+        if label:
+            findings.append("git history (unpushed commits): " + label)
 
     if findings:
         listing = "\n".join(f"  - {x}" for x in findings[:20])
@@ -340,7 +507,11 @@ def main():
             "BLOCKED by claude-for-idiots Rule 6: possible secrets would "
             "be published.\n" + listing + "\n"
             "Move secrets to a gitignored .env, add a .env.example, remove "
-            "them from git history if already committed, then retry. "
+            "them from git history if already committed, then retry.\n"
+            "If this is a test fixture or a documented example, add its "
+            "path to secrets.allowlist_paths in "
+            ".claude-for-idiots/config.json, or put # cfi:allow-secret on "
+            "the line. Never do this for a live credential.\n"
             "Warn the user clearly in their language."
         ))
 
