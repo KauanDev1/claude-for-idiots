@@ -99,6 +99,22 @@ class TestBlockMigrationEdits(TempProject):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout.strip(), "")
 
+    def test_fails_open_on_invalid_character_class_in_protected_paths(self):
+        # protected_paths comes straight out of config.json, which is as
+        # attacker/beginner-influenced as stdin -- a project generated (or
+        # hand-edited) with a backwards range like "[9-0]" or "[z-a]" made
+        # re.compile() raise re.error/re.PatternError while parsing the
+        # glob, crashing the hook with a non-zero exit instead of failing
+        # open, the same family of bug as the RecursionError/TypeError
+        # fixes elsewhere in this module.
+        cfg = {"migrations": {"tool": "x", "command": "x",
+                              "protected_paths": ["**/migrations/[9-0]*"]}}
+        self.write_config(cfg)
+        proc = run_hook(self.SCRIPT, self.event(
+            "Edit", file_path=os.path.join(self.root, "migrations/0001.py")))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
 
 class TestEnforceArchitecture(TempProject):
     SCRIPT = "enforce_architecture.py"
@@ -465,6 +481,117 @@ class TestPublishDetection(TempProject):
                    if decision(run_hook("scan_secrets_before_push.py",
                                         self.event("Bash", command=c))) is not None]
         self.assertEqual(blocked, [], "falsos positivos: " + str(blocked))
+
+
+class TestMigrationPatterns(TempProject):
+    """Rule 1's protected_paths must be anchored to actual migration
+    directories/files, never a catch-all that also swallows application code
+    or docs that merely mention "migrations", and the suggested command in
+    the deny reason must be runnable shell, not a doc placeholder like
+    `<describe_change>` that a shell reads as a redirection."""
+
+    CONFIG = {"migrations": {
+        "tool": "prisma",
+        "command": "npx prisma migrate dev --name describe_change",
+        "protected_paths": ["prisma/migrations/**", "alembic/versions/**",
+                            "**/migrations/[0-9]*", "**/migrations/*.sql"]}}
+
+    BLOCK = ["prisma/migrations/20260101_init/migration.sql",
+             "alembic/versions/abc123_init.py",
+             "app/migrations/0001_initial.py",
+             "migrations/0002_add_user.py"]
+    ALLOW = ["src/lib/migrations/runner.ts",
+             "src/features/migrations/MigrationBanner.tsx",
+             "docs/migrations/guide.md",
+             "tests/migrations/test_runner.py"]
+
+    def test_real_migrations_are_blocked(self):
+        self.write_config(self.CONFIG)
+        for rel in self.BLOCK:
+            proc = run_hook("block_migration_edits.py", self.event(
+                "Edit", file_path=os.path.join(self.root, rel)))
+            self.assertEqual(decision(proc), "deny", rel)
+
+    def test_application_code_named_migrations_is_allowed(self):
+        self.write_config(self.CONFIG)
+        for rel in self.ALLOW:
+            proc = run_hook("block_migration_edits.py", self.event(
+                "Edit", file_path=os.path.join(self.root, rel)))
+            self.assertIsNone(decision(proc), rel)
+
+    def test_the_suggested_command_is_valid_shell(self):
+        self.write_config(self.CONFIG)
+        proc = run_hook("block_migration_edits.py", self.event(
+            "Edit", file_path=os.path.join(self.root, self.BLOCK[0])))
+        reason_text = json.loads(proc.stdout)["hookSpecificOutput"][
+            "permissionDecisionReason"]
+        command = reason_text.split("run: ")[1].split("\n")[0]
+        check = subprocess.run(["bash", "-n", "-c", command],
+                               capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_a_nearby_non_numeric_non_sql_migrations_file_is_allowed(self):
+        # Property, not just the brief's examples: anything under a
+        # "migrations" directory that is neither a numbered file nor a .sql
+        # file is application code (a helper, an index, a README), not a
+        # generated migration -- must stay editable.
+        self.write_config(self.CONFIG)
+        for rel in ["migrations/README.md", "migrations/index.ts",
+                    "app/db/migrations/utils.py", "migrations/migrations.py"]:
+            proc = run_hook("block_migration_edits.py", self.event(
+                "Edit", file_path=os.path.join(self.root, rel)))
+            self.assertIsNone(decision(proc), rel)
+
+
+class TestShippedConfigExampleMigrations(unittest.TestCase):
+    """Objective lock on assets/config.example.json's migrations section --
+    the exact config a real beginner project gets from onboarding. Runs the
+    same BLOCK/ALLOW/valid-shell checks TestMigrationPatterns runs against a
+    hand-picked config, but against what actually ships."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    @classmethod
+    def setUpClass(cls):
+        raw = (cls.ROOT / "assets" / "config.example.json").read_text()
+        cls.migrations = json.loads(raw)["migrations"]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+        cfg_dir = Path(self.root) / ".claude-for-idiots"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / "config.json").write_text(
+            json.dumps({"migrations": self.migrations}))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def event(self, tool, **tool_input):
+        return {"cwd": self.root, "tool_name": tool, "tool_input": tool_input}
+
+    def test_real_migrations_are_blocked(self):
+        for rel in TestMigrationPatterns.BLOCK:
+            proc = run_hook("block_migration_edits.py", self.event(
+                "Edit", file_path=os.path.join(self.root, rel)))
+            self.assertEqual(decision(proc), "deny", rel)
+
+    def test_application_code_named_migrations_is_allowed(self):
+        for rel in TestMigrationPatterns.ALLOW:
+            proc = run_hook("block_migration_edits.py", self.event(
+                "Edit", file_path=os.path.join(self.root, rel)))
+            self.assertIsNone(decision(proc), rel)
+
+    def test_the_suggested_command_is_valid_shell(self):
+        proc = run_hook("block_migration_edits.py", self.event(
+            "Edit", file_path=os.path.join(
+                self.root, TestMigrationPatterns.BLOCK[0])))
+        reason_text = json.loads(proc.stdout)["hookSpecificOutput"][
+            "permissionDecisionReason"]
+        command = reason_text.split("run: ")[1].split("\n")[0]
+        check = subprocess.run(["bash", "-n", "-c", command],
+                               capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
 
 
 class TestSharedBehavior(TempProject):

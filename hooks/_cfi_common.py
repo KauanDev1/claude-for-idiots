@@ -144,6 +144,28 @@ def _translate_class(glob_class):
     return "[" + ("^" if negate else "") + body + "]"
 
 
+def _compile_class(glob_class):
+    """`re.compile(_translate_class(glob_class))`, or None on ANY regex error.
+
+    A `[...]` span can be well-formed glob syntax (a `[`, some content, a
+    matching `]`, found by `_find_class_end`) and still not translate into a
+    valid regex character class -- a backwards range like `[9-0]` or
+    `[z-a]` compiles fine as a *glob* class but raises `re.error` (aka
+    `re.PatternError`, same class, just renamed in newer Pythons) from
+    `re.compile`. That exception surfaces while PARSING the pattern, before
+    `.match()` is ever called, so the "unterminated bracket" fallback in
+    `_parse_glob_tokens` does not cover it. `protected_paths` /
+    `allowed_paths` come straight out of `config.json`, the same untrusted
+    input as stdin, so this must fail open (treat the whole span as
+    literal, same as an unterminated `[`) rather than let a malformed or
+    hand-typed range crash the hook with a non-zero exit.
+    """
+    try:
+        return re.compile(_translate_class(glob_class))
+    except re.error:
+        return None
+
+
 # Round 1 of this fix collapsed a run of the SAME wildcard token repeated
 # ("**/" * N). Round 2's own review then found that concatenating any two
 # *different* unrestricted-quantifier regex fragments ((?:[^/]+/)*, .*,
@@ -223,7 +245,17 @@ def _parse_glob_tokens(pattern):
                 tokens.append(("lit", pattern[index]))
                 index += 1
             else:
-                tokens.append(("class", re.compile(_translate_class(pattern[index:end + 1]))))
+                compiled = _compile_class(pattern[index:end + 1])
+                if compiled is None:
+                    # Well-formed glob-class syntax, invalid regex range
+                    # (e.g. "[9-0]") once translated -- fall back to
+                    # matching the bracket span literally, char by char,
+                    # same fail-open direction as the unterminated-bracket
+                    # branch above.
+                    for ch in pattern[index:end + 1]:
+                        tokens.append(("lit", ch))
+                else:
+                    tokens.append(("class", compiled))
                 index = end + 1
         else:
             tokens.append(("lit", pattern[index]))

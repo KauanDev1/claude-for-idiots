@@ -23,8 +23,13 @@
   },
   "migrations": {
     "tool": "prisma",
-    "command": "prisma migrate dev --name <describe_change>",
-    "protected_paths": ["prisma/migrations/**", "alembic/versions/**", "**/migrations/**"]
+    "command": "npx prisma migrate dev --name describe_change",
+    "protected_paths": [
+      "prisma/migrations/**",
+      "alembic/versions/**",
+      "**/migrations/[0-9]*",
+      "**/migrations/*.sql"
+    ]
   },
   "tests": {
     "enabled": true,
