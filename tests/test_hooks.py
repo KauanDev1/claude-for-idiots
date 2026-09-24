@@ -379,6 +379,19 @@ class TestScanSecretsBeforePush(TempProject):
         self.assertEqual(decision(proc), "deny")
         self.assertIn("ci/deploy_keys.py", reason(proc))
 
+    def test_fails_open_on_non_string_command(self):
+        # tool_input.command is attacker/tool-influenced input like anything
+        # else read from the event. A malformed event carrying e.g. a number
+        # or null for "command" used to reach PUBLISH_RE.search() directly
+        # and crash with TypeError -- a fail-open violation.
+        self._repo_with("app/leak.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        for bad_command in (123, None, ["git", "push"], {"x": 1}):
+            event = {"cwd": self.root, "tool_name": "Bash",
+                     "tool_input": {"command": bad_command}}
+            proc = run_hook(self.SCRIPT, event)
+            self.assertEqual(proc.returncode, 0, bad_command)
+            self.assertNotIn("Traceback", proc.stderr, bad_command)
+
     def test_scan_from_nested_cwd_still_allows_a_genuinely_clean_repo(self):
         # Root-relative scanning must not become "deny everything from a
         # subdirectory" -- a clean repo pushed from deep inside it should
@@ -396,6 +409,62 @@ class TestScanSecretsBeforePush(TempProject):
         }
         proc = run_hook(self.SCRIPT, event)
         self.assertIsNone(decision(proc))
+
+
+class TestPublishDetection(TempProject):
+    """Rule 6 must recognize the whole publish surface, not just `git push` and
+    a couple of `gh` subcommands -- an audit found eleven of twelve real
+    publishing commands (npm publish, vercel --prod, docker push, scp, ...)
+    sailing through untouched, plus `git push` itself dodged by any global
+    flag before the subcommand (`git -C .`, `--git-dir=`)."""
+
+    PUBLISHES = [
+        "git push origin main", "git -C . push origin main",
+        "git --git-dir=.git --work-tree=. push",
+        "git -c user.name=x push --force-with-lease",
+        "gh repo create x --public", "gh pr create", "gh gist create leak.py",
+        "gh repo edit --visibility public",
+        "npm publish", "pnpm publish", "yarn publish", "bun publish",
+        "poetry publish", "cargo publish", "twine upload dist/*",
+        "docker push myreg/app:v1", "vercel --prod", "netlify deploy --prod",
+        "firebase deploy", "flyctl deploy", "npx wrangler deploy",
+        "scp -r . user@host:/srv", "rsync -av . user@host:/srv",
+        "aws s3 sync . s3://bucket",
+        "cd app && git push",
+    ]
+    IGNORES = [
+        "ls -la", "git status", "git commit -m 'x'", "git log --oneline",
+        "npm install", "npm run build", "docker build -t x .",
+        "vercel dev", "git add -A",
+        # A publish-shaped word sitting inside a quoted argument is not a
+        # command being invoked -- it is prose. "push notification" is an
+        # extremely ordinary thing to name a feature/commit about.
+        'git commit -m "add push notification support"',
+        "git commit -m 'remember to npm publish next week'",
+        'git commit -m "docker push once CI is green"',
+    ]
+
+    def _repo_with_secret(self):
+        subprocess.run(["git", "-C", self.root, "init", "-q"],
+                       check=True, capture_output=True)
+        (Path(self.root) / "leak.py").write_text(
+            'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        subprocess.run(["git", "-C", self.root, "add", "-A"],
+                       check=True, capture_output=True)
+
+    def test_every_publishing_command_is_intercepted(self):
+        self._repo_with_secret()
+        missed = [c for c in self.PUBLISHES
+                  if decision(run_hook("scan_secrets_before_push.py",
+                                       self.event("Bash", command=c))) != "deny"]
+        self.assertEqual(missed, [], "comandos não interceptados: " + str(missed))
+
+    def test_ordinary_commands_are_left_alone(self):
+        self._repo_with_secret()
+        blocked = [c for c in self.IGNORES
+                   if decision(run_hook("scan_secrets_before_push.py",
+                                        self.event("Bash", command=c))) is not None]
+        self.assertEqual(blocked, [], "falsos positivos: " + str(blocked))
 
 
 class TestSharedBehavior(TempProject):

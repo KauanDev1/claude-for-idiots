@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Rule 6 — secrets never reach the remote.
 
-PreToolUse hook (matcher: Bash). When a command publishes anything (git push,
-gh repo create, gh release, gh pr create), scan the repo's git-tracked files for
-obvious secrets and for a tracked .env. Blocks the command if anything is found.
-Fails open on every other command.
+PreToolUse hook (matcher: Bash). When a command publishes anything -- git push
+(any global flags), gh (repo create/edit, release, pr create, gist create),
+package registries (npm/pnpm/yarn/bun/poetry/cargo/flit publish, twine
+upload), docker push, hosting deploys (vercel/netlify/firebase/flyctl/fly/
+surge/amplify/wrangler), or raw file transfer (scp/rsync/aws s3 cp/sync) --
+scan the repo's git-tracked files for obvious secrets and for a tracked .env.
+Blocks the command if anything is found. Fails open on every other command.
 
 This is a deliberately simple, extendable scanner — add patterns as needed.
 """
@@ -16,9 +19,39 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cfi_common as cfi
 
-PUBLISH_RE = re.compile(
-    r"\b(git\s+push|gh\s+repo\s+create|gh\s+release|gh\s+pr\s+create)\b"
-)
+# Matches only "git ... push", not any other publishing command -- kept
+# separate (rather than inlined into PUBLISH_RE below) so a future hook that
+# needs to tell "this is specifically a git push" apart from "this is some
+# other kind of publish" (git never sends a gitignored file; scp/vercel/etc.
+# upload the whole working directory, gitignored or not) can reuse it instead
+# of writing a second copy. `[^|;&]*?` -- any run of characters that isn't a
+# shell separator -- absorbs git's own global flags (`-C .`, `--git-dir=`,
+# `-c k=v`) between `git` and `push` without crossing into a chained command
+# (`git status && ls push` must NOT match).
+GIT_PUSH_RE = re.compile(r"\bgit\b[^|;&]*?\bpush\b")
+
+# The whole publish surface, not just git/gh: package registries (npm/pnpm/
+# yarn/bun/poetry/cargo/flit/twine), container registries (docker push),
+# hosting platforms (vercel/netlify/firebase/flyctl/fly/surge/amplify,
+# wrangler), and raw file transfer (scp/rsync/aws s3). An audit of twelve
+# real publishing commands found eleven passing through the old regex
+# untouched, and `git push` itself dodged by any global flag placed before
+# the subcommand. Case-insensitive because a shell doesn't care and neither
+# should this.
+PUBLISH_RE = re.compile(r"""(?xi)
+      """ + GIT_PUSH_RE.pattern + r"""
+    | \bgh\s+(?: repo\s+(?:create|edit)
+               | release\b
+               | pr\s+create
+               | gist\s+create )
+    | \b(?:npm|pnpm|yarn|bun|poetry|cargo|flit)\s+publish\b
+    | \btwine\s+upload\b
+    | \bdocker\s+push\b
+    | \b(?:vercel|netlify|firebase|flyctl|fly|surge|amplify)\b(?=[^|;&]*(?:deploy|publish|--prod))
+    | \bwrangler\s+(?:deploy|publish)\b
+    | \b(?:scp|rsync)\s
+    | \baws\s+s3\s+(?:cp|sync)\b
+""")
 
 SECRET_PATTERNS = [
     ("AWS access key id", re.compile(r"AKIA[0-9A-Z]{16}")),
@@ -80,6 +113,43 @@ def tracked_files(root):
     return [n.decode("utf-8", "surrogateescape") for n in names if n]
 
 
+def blank_quoted(command):
+    """`command` with the CONTENTS of every '...'/"..." span replaced by
+    spaces, quote characters themselves kept in place.
+
+    PUBLISH_RE's whole point is to tell "this command publishes something"
+    from free text sitting in an argument -- and the single most common
+    free-text argument in a git workflow is a commit message. Without this,
+    `git commit -m "add push notification support"` matches PUBLISH_RE: the
+    word "push" sits right after "git" with nothing but ordinary characters
+    (no `|`, `;`, `&`) in between, exactly what the publish patterns are
+    built to tolerate (git's own global flags, docker's registry path, ...).
+    Blanking quoted content first means a publish-shaped word only counts
+    when it is actually part of the command being invoked, not part of what
+    a flag's value says. This helps every alternative in PUBLISH_RE, not
+    just git -- "remember to npm publish next week" in a commit message is
+    exactly as much a false positive as the push case.
+
+    Deliberately not real shell parsing (no backslash-escape handling, no
+    distinguishing single- from double-quote semantics): an unterminated
+    quote just blanks to the end of the string, which only ever suppresses a
+    potential match, never manufactures one out of quoted text -- the safe
+    direction for a fail-open hook.
+    """
+    out = []
+    quote = None
+    for ch in command:
+        if quote:
+            out.append(ch if ch == quote else " ")
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        out.append(ch)
+    return "".join(out)
+
+
 def main():
     event = cfi.read_event()
     if not event:
@@ -88,7 +158,14 @@ def main():
     if event.get("tool_name") != "Bash":
         cfi.allow()
     command = (event.get("tool_input") or {}).get("command", "")
-    if not PUBLISH_RE.search(command):
+    if not isinstance(command, str):
+        # Pre-existing gap, not introduced here: `tool_input.command` is
+        # attacker/tool-influenced input, same as everything else read from
+        # the event. A non-string value (a malformed or hostile event) used
+        # to reach PUBLISH_RE.search() directly and raise TypeError --
+        # crashing the hook with a non-zero exit instead of failing open.
+        cfi.allow()
+    if not PUBLISH_RE.search(blank_quoted(command)):
         cfi.allow()
 
     cwd = event.get("cwd") or os.getcwd()
