@@ -1,4 +1,4 @@
-import io, re, sys, time, unittest
+import io, random, re, sys, time, unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
@@ -102,6 +102,160 @@ class TestGlobReDoS(unittest.TestCase):
         self.assertTrue(c.matches_any("app/db/migrations/0001.py",
                                        ["**/**/migrations/**"]))
         self.assertFalse(c.matches_any("app/db/migrations", ["**/**/x/**"]))
+
+
+class TestGlobListWorkBudget(unittest.TestCase):
+    """CRITICAL-A (fix round 3): the per-pattern/per-path caps bound a SINGLE
+    compile_glob().match() call, but matches_any() iterates a whole list with
+    no limit on how many patterns it tries. protected_paths/allowed_paths
+    come from config.json, which comes from a cloned repo -- third-party
+    input. A pattern near the per-pattern cap already costs a measurable
+    fraction of a second; a list of hundreds of them must not multiply that
+    cost by the list length, or a config.json alone can push a hook past
+    Claude Code's 60s PreToolUse timeout.
+    """
+
+    # Near both caps: long literal run + wildcards + long literal run, so it
+    # both maximizes token count (near MAX_GLOB_PATTERN_CHARS) and forces the
+    # DP to scan the full path (near MAX_GLOB_PATH_CHARS) before failing to
+    # match -- the worst case for a single compile_glob().match() call.
+    _EXPENSIVE_PATTERN = "a" * 510 + "*" * 10 + "a" * 500 + "z"
+    _NONMATCHING_PATH = "a" * (c.MAX_GLOB_PATH_CHARS - 1)
+
+    def test_total_cost_does_not_scale_with_pattern_count(self):
+        # The property under test: elapsed time for matches_any() stays
+        # bounded by a small constant, REGARDLESS of how many expensive,
+        # non-matching patterns the list holds. An unbounded implementation
+        # makes this grow linearly (0.42s/pattern per the round-3 review
+        # measurement); a bounded one does not, even at 600 patterns.
+        for count in (1, 50, 600):
+            start = time.monotonic()
+            result = c.matches_any(self._NONMATCHING_PATH,
+                                    [self._EXPENSIVE_PATTERN] * count)
+            elapsed = time.monotonic() - start
+            self.assertFalse(result)
+            self.assertLess(
+                elapsed, 3.0,
+                f"{count} expensive patterns took {elapsed:.2f}s -- "
+                "matches_any has no aggregate work budget")
+
+    def test_a_pattern_list_whose_cost_exceeds_the_budget_returns_on_incomplete(self):
+        # Deterministic (non-timing) version of the same property: build a
+        # list of copies of the single most expensive possible pattern
+        # (MAX_GLOB_PATTERN_CHARS tokens against a MAX_GLOB_PATH_CHARS
+        # path), with enough copies that their cumulative cost is
+        # mathematically guaranteed to exceed the aggregate budget -- the
+        # count is DERIVED from the module's own constants, not hardcoded,
+        # so this stays correct if MAX_GLOB_MATCH_WORK is ever retuned.
+        path = "a" * c.MAX_GLOB_PATH_CHARS
+        pattern = "?" * c.MAX_GLOB_PATTERN_CHARS
+        single_cost = c.MAX_GLOB_PATTERN_CHARS * c.MAX_GLOB_PATH_CHARS
+        count = c.MAX_GLOB_MATCH_WORK // single_cost + 2
+        patterns = [pattern] * count
+        self.assertGreater(single_cost * count, c.MAX_GLOB_MATCH_WORK)
+        self.assertFalse(c.matches_any(path, patterns))
+        self.assertTrue(c.matches_any(path, patterns, on_incomplete=True))
+
+    def test_early_match_short_circuits_before_the_budget_matters(self):
+        # A budget must never break ordinary, well-formed lists: the very
+        # first (cheap) pattern in a normal-sized list still matches
+        # immediately, even when later entries in the same list would have
+        # been expensive.
+        patterns = ["src/**", self._EXPENSIVE_PATTERN]
+        self.assertTrue(c.matches_any("src/app/page.tsx", patterns))
+
+    def test_realistic_pattern_list_is_unaffected_by_the_budget(self):
+        # A real project's allowed_paths/protected_paths list (a handful of
+        # short patterns) must keep matching exactly as before -- the budget
+        # exists for pathological configs, not ordinary ones.
+        patterns = ["app/**", "src/**", "components/**", "lib/**", "tests/**",
+                    "*.config.*", "middleware.ts", "*.d.ts"]
+        self.assertTrue(c.matches_any("src/app/page.tsx", patterns))
+        self.assertFalse(c.matches_any("random/thing.py", patterns))
+
+
+class TestCharacterClassNeverRaises(unittest.TestCase):
+    """CRITICAL-B (fix round 3): compile_glob must never propagate re.error.
+
+    _translate_class only escapes '\\' and a literal leading '^' -- it never
+    validates the class body. A descending range ('[b-a]') reaches
+    re.compile() unchanged and raises re.error, which was uncaught: a
+    protected_paths/allowed_paths entry this shape crashed the hook (exit
+    1, traceback) instead of failing open. Two rounds of review missed this
+    because they were looking at backtracking, not validation.
+    """
+
+    def test_known_descending_range_does_not_raise(self):
+        try:
+            result = c.matches_any("b", ["[b-a]"])
+        except re.error:
+            self.fail("compile_glob raised re.error on a descending range")
+        self.assertIsInstance(result, bool)
+
+    def test_descending_range_behaves_as_non_matching_literal_class(self):
+        # Documents the chosen fallback semantics: an invalid class matches
+        # nothing, the same fail-open direction as an unterminated '[' or an
+        # over-cap pattern -- never "matches everything" and never raises.
+        self.assertFalse(c.matches_any("a", ["[b-a]"]))
+        self.assertFalse(c.matches_any("b", ["[b-a]"]))
+        self.assertFalse(c.matches_any("", ["[b-a]"]))
+
+    def test_fuzzed_descending_ranges_never_raise(self):
+        # Property test, not a PoC replay: generates many DIFFERENT
+        # descending-range class bodies (random codepoints, random padding,
+        # random negation) and confirms none of them ever raises, through
+        # the real tokenizer path (compile_glob), not a hand-picked string.
+        rng = random.Random(20260924)
+        padding_chars = list("abcXYZ019!^-\\[]/*?.(){}|+$ ")
+        paths = ["a", "z", "0-9", "abc/def.py", "[b-a]", "", "-", "^", "\\", "migrations/0001.py"]
+        for _ in range(500):
+            hi, lo = rng.sample(range(0x21, 0x7e), 2)
+            if hi < lo:
+                hi, lo = lo, hi
+            # hi > lo in codepoint, written hi-lo -> guaranteed descending.
+            range_body = chr(hi) + "-" + chr(lo)
+            padding = "".join(rng.choice(padding_chars) for _ in range(rng.randint(0, 4)))
+            position = rng.choice(("prefix", "suffix", "middle"))
+            if position == "prefix":
+                body = range_body + padding
+            elif position == "suffix":
+                body = padding + range_body
+            else:
+                half = len(padding) // 2
+                body = padding[:half] + range_body + padding[half:]
+            negate = rng.choice(("", "!"))
+            pattern = "[" + negate + body + "]"
+            for path in paths:
+                try:
+                    result = c.matches_any(path, [pattern])
+                except re.error as exc:
+                    self.fail(f"compile_glob raised re.error on pattern={pattern!r}: {exc}")
+                self.assertIsInstance(result, bool)
+
+    def test_fuzzed_arbitrary_bracket_junk_never_raises(self):
+        # Broader, less targeted fuzz: arbitrary junk inside a class body,
+        # not engineered to be any particular shape. Covers class-related
+        # failure modes beyond descending ranges, should any exist.
+        rng = random.Random(986123)
+        junk_chars = list("abcXYZ019!^-\\[]/*?.(){}|+$~& \t")
+        for _ in range(500):
+            body = "".join(rng.choice(junk_chars) for _ in range(rng.randint(0, 10)))
+            pattern = "[" + body + "]"
+            try:
+                result = c.matches_any("some/random/path.py", [pattern])
+            except re.error as exc:
+                self.fail(f"compile_glob raised re.error on pattern={pattern!r}: {exc}")
+            self.assertIsInstance(result, bool)
+
+    def test_well_formed_classes_are_unaffected(self):
+        # Regression guard: the fix must not change matching for valid
+        # classes -- only invalid ones get the new fallback behavior.
+        self.assertTrue(c.matches_any("migrations/0001_init.py",
+                                       ["**/migrations/[0-9]*"]))
+        self.assertFalse(c.matches_any("migrations/runner.ts",
+                                        ["**/migrations/[0-9]*"]))
+        self.assertTrue(c.matches_any("migrations/a.py",
+                                       ["**/migrations/[!0-9]*"]))
 
 
 class TestReadEventDefensiveParsing(unittest.TestCase):

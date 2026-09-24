@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -822,6 +823,173 @@ class TestSharedBehavior(TempProject):
             capture_output=True, text=True, timeout=30, cwd="/",
         )
         self.assertIsNone(decision(proc))
+
+
+class TestGlobListWorkBudgetEndToEnd(TempProject):
+    """CRITICAL-A (fix round 3), exercised through the real hook subprocess
+    (not just the library function): a config.json listing many expensive
+    glob patterns must not push a hook's wall-clock time toward Claude
+    Code's 60s PreToolUse timeout. Uses the same near-worst-case pattern
+    shape as the round-3 review's own measurement (a long literal prefix +
+    wildcards + long literal suffix, forcing the DP to scan the whole
+    non-matching path instead of failing out after the first character).
+    """
+
+    _EXPENSIVE_PATTERN = "a" * 510 + "*" * 10 + "a" * 500 + "z"
+    # Single path component (no '/'), so the DP cannot bail out early on a
+    # literal mismatch at the first separator -- it must actually walk the
+    # wildcard section, matching the cost the review measured. Under
+    # MAX_GLOB_PATH_CHARS so cost() is not simply 0 via the per-path cap.
+    _NONMATCHING_MIGRATION_TARGET = "a" * 4094 + "q"
+    _NONMATCHING_CODE_TARGET = "a" * 4090 + ".py"
+
+    def test_many_expensive_protected_paths_do_not_stall_block_migration_edits(self):
+        self.write_config({"migrations": {
+            "tool": "x", "command": "x",
+            "protected_paths": [self._EXPENSIVE_PATTERN] * 200}})
+        start = time.monotonic()
+        proc = run_hook("block_migration_edits.py", self.event(
+            "Edit", file_path=os.path.join(self.root, self._NONMATCHING_MIGRATION_TARGET)))
+        elapsed = time.monotonic() - start
+        self.assertEqual(proc.returncode, 0)
+        self.assertIsNone(decision(proc))
+        self.assertLess(elapsed, 10.0,
+                         f"block_migration_edits.py took {elapsed:.2f}s for 200 expensive patterns")
+
+    def test_many_expensive_allowed_paths_do_not_stall_enforce_architecture(self):
+        self.write_config({"architecture": {
+            "name": "x", "enforce": "deny",
+            "allowed_paths": [self._EXPENSIVE_PATTERN] * 200, "layers": {}}})
+        start = time.monotonic()
+        proc = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, self._NONMATCHING_CODE_TARGET)))
+        elapsed = time.monotonic() - start
+        self.assertEqual(proc.returncode, 0)
+        self.assertLess(elapsed, 10.0,
+                         f"enforce_architecture.py took {elapsed:.2f}s for 200 expensive patterns")
+
+
+class TestCompileGlobNeverCrashesTheRealHook(TempProject):
+    """CRITICAL-B (fix round 3), the exact end-to-end repro from the brief:
+    a descending-range character class in protected_paths must not crash
+    block_migration_edits.py."""
+
+    def test_descending_range_in_protected_paths_fails_open(self):
+        self.write_config({"migrations": {
+            "tool": "x", "command": "x", "protected_paths": ["[b-a]"]}})
+        proc = run_hook("block_migration_edits.py", self.event(
+            "Edit", file_path=os.path.join(self.root, "b")))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIsNone(decision(proc))
+
+
+class TestAllowedVsProtectedFailOpenSymmetry(TempProject):
+    """IMPORTANT (fix round 3): matches_any's aggregate work budget must
+    fail open in the DIRECTION each hook needs, not just return a fixed
+    boolean. block_migration_edits.py DENIES on a match (protected_paths),
+    so an unevaluated pattern list must never manufacture a block.
+    enforce_architecture.py ALLOWS on a match (allowed_paths), so an
+    unevaluated pattern list must never manufacture a deny/ask -- otherwise
+    an absurd config makes Rule 5 over-block legitimate writes instead of
+    just degrading, the exact asymmetry the round-3 review reported (a
+    1044-char allowed_paths entry that should have matched instead denied).
+    """
+
+    _EXPENSIVE_PATTERN = "a" * 510 + "*" * 10 + "a" * 500 + "z"
+    # Enough copies that the aggregate budget is exhausted before the list
+    # is fully evaluated (see test_common.py's derivation of this count from
+    # the module's own constants; hardcoded here at a value known to exceed
+    # it with today's cap sizes: 200 * ~4.18M cells far exceeds 20M).
+    _MANY = [_EXPENSIVE_PATTERN] * 200
+
+    def test_enforce_architecture_allows_when_allowed_paths_cannot_be_fully_evaluated(self):
+        self.write_config({"architecture": {
+            "name": "x", "enforce": "deny",
+            "allowed_paths": self._MANY, "layers": {}}})
+        proc = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, "a" * 4090 + ".py")))
+        self.assertIsNone(decision(proc),
+                           "an unevaluated allowed_paths list must ALLOW, not deny/ask")
+
+    def test_block_migration_edits_allows_when_protected_paths_cannot_be_fully_evaluated(self):
+        self.write_config({"migrations": {
+            "tool": "x", "command": "x", "protected_paths": self._MANY}})
+        proc = run_hook("block_migration_edits.py", self.event(
+            "Edit", file_path=os.path.join(self.root, "a" * 4094 + "q")))
+        self.assertIsNone(decision(proc),
+                           "an unevaluated protected_paths list must ALLOW, not block")
+
+
+class TestMainNeverExitsNonZero(TempProject):
+    """Item 4 (fix round 3): a blanket try/except around every hook's
+    main() call, as a backstop for the NEXT unanticipated exception -- this
+    execution alone found four of this same shape (RecursionError on deep
+    JSON, re.error on a descending range, TypeError on a non-string
+    command, and the ReDoS/work-budget family). Simulates "a bug nobody has
+    found yet" by forcing an unrelated, generic exception deep inside
+    main()'s call chain via monkeypatching, then running the hook's own
+    `if __name__ == "__main__":` guard through runpy so the real
+    try/except wrapper is exercised, not a hand test of the exception
+    handler in isolation.
+    """
+
+    def _run_with_forced_exception(self, script, patch_target, event):
+        harness = f"""
+import sys, runpy
+sys.path.insert(0, {str(HOOKS_DIR)!r})
+import _cfi_common as cfi
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("simulated unanticipated failure")
+
+{patch_target} = _boom
+runpy.run_path({str(HOOKS_DIR / script)!r}, run_name="__main__")
+"""
+        return subprocess.run(
+            [sys.executable, "-c", harness],
+            input=json.dumps(event) if isinstance(event, dict) else event,
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_block_migration_edits_survives_a_failure_reading_the_event(self):
+        self.write_config(MIGRATIONS_CONFIG)
+        proc = self._run_with_forced_exception(
+            "block_migration_edits.py", "cfi.read_event",
+            self.event("Edit", file_path=os.path.join(self.root, "alembic/versions/a.py")))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_block_migration_edits_survives_a_failure_inside_matches_any(self):
+        self.write_config(MIGRATIONS_CONFIG)
+        proc = self._run_with_forced_exception(
+            "block_migration_edits.py", "cfi.matches_any",
+            self.event("Edit", file_path=os.path.join(self.root, "alembic/versions/a.py")))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_enforce_architecture_survives_a_failure_reading_the_event(self):
+        self.write_config(ARCH_CONFIG)
+        proc = self._run_with_forced_exception(
+            "enforce_architecture.py", "cfi.read_event",
+            self.event("Write", file_path=os.path.join(self.root, "random/thing.py")))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_enforce_architecture_survives_a_failure_inside_matches_any(self):
+        self.write_config(ARCH_CONFIG)
+        proc = self._run_with_forced_exception(
+            "enforce_architecture.py", "cfi.matches_any",
+            self.event("Write", file_path=os.path.join(self.root, "app/services/x.py")))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_scan_secrets_before_push_survives_a_failure_reading_the_event(self):
+        proc = self._run_with_forced_exception(
+            "scan_secrets_before_push.py", "cfi.read_event",
+            self.event("Bash", command="git push origin main"))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
 
 
 if __name__ == "__main__":

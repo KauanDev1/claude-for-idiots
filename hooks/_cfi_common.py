@@ -9,6 +9,7 @@ import os
 import posixpath
 import re
 import sys
+import warnings
 from functools import lru_cache
 
 CONFIG_REL = os.path.join(".claude-for-idiots", "config.json")
@@ -159,9 +160,18 @@ def _compile_class(glob_class):
     input as stdin, so this must fail open (treat the whole span as
     literal, same as an unterminated `[`) rather than let a malformed or
     hand-typed range crash the hook with a non-zero exit.
+
+    Warnings are suppressed locally for the same reason. Some valid-but-
+    unusual bodies (`[a-z-A]`) make CPython's `re` emit a FutureWarning for
+    set-operation syntax it is reserving, rather than raise. A hook does not
+    control the environment it runs in: under `PYTHONWARNINGS=error` or
+    `-W error` that same config-supplied pattern would raise instead. Never
+    let compiling a config value depend on the caller's warnings settings.
     """
     try:
-        return re.compile(_translate_class(glob_class))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return re.compile(_translate_class(glob_class))
     except re.error:
         return None
 
@@ -198,6 +208,38 @@ def _compile_class(glob_class):
 MAX_GLOB_PATTERN_CHARS = 1024
 MAX_GLOB_PATH_CHARS = 4096
 
+# CRITICAL-A (fix round 3): the two caps above bound a SINGLE compile_glob()
+# .match() call, but matches_any() iterates a whole protected_paths/
+# allowed_paths LIST with no limit on how many patterns it tries -- the
+# product of "cost per pattern" x "number of patterns" has no ceiling.
+# Measured: a single near-both-caps pattern ("a"*510 + "*"*10 + "a"*500 +
+# "z", ~1021 tokens, against a 4095-char non-matching path) costs ~0.42s.
+# That one pattern already spends a noticeable slice of Claude Code's 60s
+# PreToolUse timeout; a config.json listing a few hundred such patterns
+# (150 -> ~44s, 600 -> ~175s measured on the reviewing machine) blows past
+# it entirely, and protected_paths/allowed_paths come from config.json,
+# which comes from a repo the user cloned -- third-party input, same as
+# everything else this module bounds.
+#
+# MAX_GLOB_MATCH_WORK caps the TOTAL work matches_any() will spend across
+# an entire pattern list, in "cells" -- the same unit the DP already
+# processes one at a time: `len(tokens) * len(path)`, computed from the
+# already-parsed (and lru_cache'd) token list, no extra parsing needed to
+# estimate it. Patterns are tried in order, subtracting each one's cost
+# from the remaining budget; the moment the NEXT pattern's cost would
+# exceed what is left, matching stops without running that pattern's DP at
+# all. This bounds total work to at most MAX_GLOB_MATCH_WORK cells no
+# matter how many patterns the list holds or what order they come in.
+#
+# The measured rate above is ~4.18M cells in 0.42s, ~10M cells/s. A budget
+# of 20_000_000 cells therefore bounds a single matches_any() call to
+# roughly 2s at that rate -- and to roughly 10s even on hardware 5x slower,
+# still a wide margin under the 60s hook timeout -- while staying far above
+# the cost of any realistic protected_paths/allowed_paths list (a handful
+# of short patterns against a path of a few dozen characters: a few hundred
+# cells, not millions).
+MAX_GLOB_MATCH_WORK = 20_000_000
+
 
 class _NeverMatches:
     """compile_glob's result for a pattern over MAX_GLOB_PATTERN_CHARS."""
@@ -206,6 +248,11 @@ class _NeverMatches:
 
     def match(self, path):
         return False
+
+    def cost(self, path_len):
+        """Work `match()` would spend -- always 0: over-cap patterns never
+        run the DP at all, so they never draw on the work budget either."""
+        return 0
 
 
 _NEVER_MATCHES = _NeverMatches()
@@ -342,6 +389,19 @@ class _GlobPattern:
             return False
         return _dp_match(self._tokens, path)
 
+    def cost(self, path_len):
+        """Upper bound on the work `match()` would spend against a path of
+        `path_len` characters, in the same "cells" unit MAX_GLOB_MATCH_WORK
+        budgets -- `len(tokens) * path_len`, mirroring `_dp_match`'s O(len
+        (tokens) * len(path)) loop structure exactly (each token does O(path
+        length) work; the `starstar_slash` branch's one-off next_slash
+        precompute is itself O(path length), so it does not change the
+        bound). 0 for a path over MAX_GLOB_PATH_CHARS, matching `match()`'s
+        own early return -- that call never runs the DP either."""
+        if path_len > MAX_GLOB_PATH_CHARS:
+            return 0
+        return len(self._tokens) * path_len
+
 
 @lru_cache(maxsize=512)
 def compile_glob(pattern):
@@ -359,10 +419,41 @@ def compile_glob(pattern):
     return _GlobPattern(_parse_glob_tokens(pattern))
 
 
-def matches_any(rel_path, patterns):
+def matches_any(rel_path, patterns, *, on_incomplete=False):
+    """True when rel_path matches any pattern in patterns.
+
+    Bounded by MAX_GLOB_MATCH_WORK across the WHOLE list (see its docstring
+    for why an aggregate cap is needed on top of compile_glob's per-pattern
+    ones). Patterns are tried in order; the moment the next one's cost would
+    exceed the remaining budget, iteration stops and `on_incomplete` is
+    returned instead of quietly finishing the scan as "no match" -- a config
+    absurd enough to blow the budget must never make matches_any() lie about
+    having checked every pattern.
+
+    `on_incomplete` lets each caller keep its OWN fail-open direction even
+    when the list can't be fully evaluated: Rule 1's protected_paths DENIES
+    on a match, so its caller should keep the default `False` (an
+    unevaluated tail of patterns never manufactures a block). Rule 5's
+    allowed_paths ALLOWS on a match, so its caller must pass `on_incomplete=
+    True` -- otherwise an absurdly expensive config would flip Rule 5 from
+    "safety net degrades" to "legitimate writes start getting denied",
+    fail-closed, exactly backwards for a hook whose one hard invariant is
+    fail-open. (Below the budget, this parameter has no effect: every
+    pattern still gets tried and the result is the same as before.)
+    """
     if not rel_path:
         return False
-    return any(compile_glob(p).match(rel_path) for p in str_list(patterns))
+    budget = MAX_GLOB_MATCH_WORK
+    path_len = len(rel_path)
+    for pattern in str_list(patterns):
+        compiled = compile_glob(pattern)
+        cost = compiled.cost(path_len)
+        if cost > budget:
+            return on_incomplete
+        budget -= cost
+        if compiled.match(rel_path):
+            return True
+    return False
 
 
 def relativize(file_path, cwd):

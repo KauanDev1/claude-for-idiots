@@ -348,4 +348,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Last-resort net -- see block_migration_edits.py for the rationale
+        # (this codebase has already found three distinct fail-open gaps of
+        # this same shape across the three hooks). Never catches the
+        # SystemExit that cfi.allow()/cfi.decide() raise.
+        sys.exit(0)
