@@ -29,6 +29,7 @@ tests/
   integration/
 ```
 `allowed_paths`: `["app/**", "tests/**"]`
+`enforce`: `deny` (layout is stable)
 Migrations tool: Alembic (`alembic/versions/**` protected).
 
 ## NestJS (backend API, TypeScript)
@@ -45,6 +46,7 @@ src/
 test/
 ```
 `allowed_paths`: `["src/**", "test/**"]`
+`enforce`: `deny` (layout is stable)
 
 ## Next.js (web app / full-stack, React)
 
@@ -60,6 +62,7 @@ src/
 tests/
 ```
 `allowed_paths`: `["src/**", "tests/**"]`
+`enforce`: `ask` (root-level configs vary)
 If using Prisma: protect `prisma/migrations/**`.
 
 ## Flutter (mobile)
@@ -77,6 +80,7 @@ lib/
 test/
 ```
 `allowed_paths`: `["lib/**", "test/**"]`
+`enforce`: `deny` (feature-first layout is stable)
 
 ## Python CLI / automation (Typer)
 
@@ -90,6 +94,7 @@ src/<pkg>/
 tests/
 ```
 `allowed_paths`: `["src/**", "tests/**"]`
+`enforce`: `ask` (flat and small — a soft nudge is enough)
 
 ## Data / ML prototype (Python)
 
@@ -104,6 +109,7 @@ notebooks/
 tests/
 ```
 `allowed_paths`: `["src/**", "tests/**", "notebooks/**"]`
+`enforce`: `ask` (pipeline stage boundaries are still explorative)
 
 ---
 

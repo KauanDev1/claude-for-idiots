@@ -50,9 +50,17 @@ def main():
         cfi.allow()
 
     arch = cfi.section(config, "architecture")
-    mode = arch.get("enforce", "off")
+    # "off" as the default meant a config written without this key silently
+    # disabled the rule the skill advertises. "ask" is the safe default: it
+    # surfaces the decision instead of swallowing it. Any OTHER value --
+    # explicit "off", a typo, or a config field of the wrong type entirely --
+    # still fails open here, so a malformed or intentionally-disabled config
+    # can never crash the hook or escalate into an accidental deny.
+    mode = arch.get("enforce", "ask")
+    if mode not in ("deny", "ask"):
+        cfi.allow()
     allowed = cfi.str_list(arch.get("allowed_paths"))
-    if mode == "off" or not allowed:
+    if not allowed:
         cfi.allow()
 
     rel = cfi.relativize(file_path, cwd)

@@ -119,7 +119,8 @@ After stack/architecture are settled:
    `<project>/CLAUDE.md` (merge, don't clobber, if one already exists).
 2. Write `<project>/.claude-for-idiots/config.json` using
    `assets/config.example.json` as the shape. Fill `migrations`,
-   `architecture.allowed_paths`, `tests`, etc. — the hooks read these. Record
+   `architecture.allowed_paths`, `architecture.enforce` (`deny` | `ask`),
+   `tests`, etc. — the hooks read these. Record
    `skill_version` from this skill's `VERSION` file (updates use it to know
    where the project is starting from).
 3. Create `<project>/.claude/hooks/` and copy the four files from this

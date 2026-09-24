@@ -172,6 +172,40 @@ class TestPolicedExtensions(TempProject):
         self.assertIsNone(decision(proc))
 
 
+class TestEnforceMode(TempProject):
+    def test_missing_enforce_defaults_to_ask_not_off(self):
+        cfg = {"architecture": {"name": "x", "allowed_paths": ["src/**"],
+                                "layers": {}}}
+        self.write_config(cfg)
+        proc = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, "random", "x.py")))
+        self.assertEqual(decision(proc), "ask")
+
+    def test_malformed_config_fails_open_without_crashing(self):
+        for raw in ['{"architecture": "layered"}',
+                    '{"architecture": ["a"]}',
+                    '{"architecture": {"allowed_paths": "src/**"}}',
+                    '{broken', '[]', '']:
+            cfg_dir = Path(self.root) / ".claude-for-idiots"
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            (cfg_dir / "config.json").write_text(raw)
+            proc = run_hook("enforce_architecture.py", self.event(
+                "Write", file_path=os.path.join(self.root, "random", "x.py")))
+            self.assertEqual(proc.returncode, 0, raw)
+            self.assertNotIn("Traceback", proc.stderr, raw)
+
+    def test_allowed_paths_as_bare_string_still_works(self):
+        cfg = {"architecture": {"name": "x", "enforce": "deny",
+                                "allowed_paths": "src/**", "layers": {}}}
+        self.write_config(cfg)
+        ok = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, "src", "x.py")))
+        bad = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, "random", "x.py")))
+        self.assertIsNone(decision(ok))
+        self.assertEqual(decision(bad), "deny")
+
+
 class TestScanSecretsBeforePush(TempProject):
     SCRIPT = "scan_secrets_before_push.py"
 
