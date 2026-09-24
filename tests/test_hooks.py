@@ -172,6 +172,94 @@ class TestPolicedExtensions(TempProject):
         self.assertIsNone(decision(proc))
 
 
+class TestIgnoreListOverrideRobustness(TempProject):
+    """Round-1 review findings: the override must behave as predictably as
+    the built-in default list, or a beginner's typo silently turns Rule 5
+    into "police literally everything" without any error or warning."""
+
+    def _check(self, override_entry, filename):
+        cfg = json.loads(json.dumps(ARCH_CONFIG))
+        cfg["architecture"]["ignored_extensions"] = [override_entry]
+        self.write_config(cfg)
+        proc = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, "random", filename)))
+        return decision(proc)
+
+    def test_override_matching_is_case_insensitive_both_ways(self):
+        # The default list already lowercases before comparing (achado 1
+        # measured ".TS" in config failing to exempt "x.ts" and "x.TS").
+        # Whichever side -- config or filename -- carries the odd case, the
+        # match must still happen.
+        for override_entry, filename in [
+            (".TS", "x.ts"), (".TS", "x.TS"), (".ts", "x.TS"), (".Md", "x.mD"),
+        ]:
+            self.assertIsNone(self._check(override_entry, filename),
+                               f"override={override_entry!r} file={filename!r}")
+
+    def test_override_entry_without_leading_dot_still_exempts_its_extension(self):
+        # os.path.splitext always returns the extension WITH its dot, so an
+        # override entry typed without one ("ts" instead of ".ts") used to
+        # match nothing at all -- not even the extension the author meant to
+        # exempt -- which is how achado 2 turned a one-character typo into
+        # "policia o projeto inteiro".
+        for override_entry, filename in [
+            ("ts", "x.ts"), ("PY", "x.py"), ("Json", "x.json"),
+        ]:
+            self.assertIsNone(self._check(override_entry, filename),
+                               f"override={override_entry!r} file={filename!r}")
+
+    def test_override_entry_with_stray_whitespace_still_exempts_its_extension(self):
+        for override_entry, filename in [(" .ts", "x.ts"), (".ts ", "x.ts"),
+                                          (" ts ", "x.ts")]:
+            self.assertIsNone(self._check(override_entry, filename),
+                               f"override={override_entry!r} file={filename!r}")
+
+    def test_override_that_normalizes_to_nothing_falls_back_to_default(self):
+        # If every override entry is whitespace and normalizes away to
+        # nothing, that is a malformed config, not a deliberate "ignore
+        # nothing" instruction. Fail open to the default list rather than
+        # policing every file in the project -- consistent with how this
+        # hook already fails open elsewhere on malformed config.
+        cfg = json.loads(json.dumps(ARCH_CONFIG))
+        cfg["architecture"]["ignored_extensions"] = ["   "]
+        self.write_config(cfg)
+        proc = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, "random", "notes.md")))
+        self.assertIsNone(decision(proc))
+
+
+class TestDotenvAndDataFilesAreIgnored(TempProject):
+    def _not_policed(self, filename, cfg=None):
+        self.write_config(cfg if cfg is not None else ARCH_CONFIG)
+        proc = run_hook("enforce_architecture.py", self.event(
+            "Write", file_path=os.path.join(self.root, "random", filename)))
+        self.assertIsNone(decision(proc), filename)
+
+    def test_dotenv_and_its_suffixed_siblings_are_never_policed(self):
+        # os.path.splitext(".env.local") reports the extension as ".local",
+        # not ".env" -- achado 3 measured ".env" passing while ".env.local"
+        # and ".env.production" (the standard Next.js/Vite convention) were
+        # denied.
+        for name in [".env", ".env.local", ".env.production",
+                     ".env.development.local", ".env.test"]:
+            self._not_policed(name)
+
+    def test_dotenv_stays_exempt_even_under_a_narrow_override(self):
+        # A dotenv file is never "code" for Rule 5, the same way an
+        # extension-less file (Dockerfile, Makefile, LICENSE) never is --
+        # unconditionally, regardless of what the project chose to police.
+        cfg = json.loads(json.dumps(ARCH_CONFIG))
+        cfg["architecture"]["ignored_extensions"] = [".ts"]
+        for name in [".env.local", ".env.production"]:
+            self._not_policed(name, cfg)
+
+    def test_ml_data_file_extensions_are_ignored_by_default(self):
+        # achado 4: .parquet and .pkl are direct siblings of .csv/.tsv,
+        # which were already ignored.
+        for name in ["train.parquet", "model.pkl"]:
+            self._not_policed(name)
+
+
 class TestEnforceMode(TempProject):
     def test_missing_enforce_defaults_to_ask_not_off(self):
         cfg = {"architecture": {"name": "x", "allowed_paths": ["src/**"],

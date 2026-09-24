@@ -24,17 +24,58 @@ IGNORED_EXT = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
     ".woff", ".woff2", ".ttf", ".otf", ".eot",
     ".pdf", ".zip", ".gz", ".tar", ".mp3", ".mp4", ".webm",
+    ".parquet", ".pkl",
+    ".bz2", ".7z", ".rar", ".xz",
 }
+
+
+def _normalize_ext(raw):
+    """Best-effort normalize one config-supplied extension token: trim
+    whitespace, lowercase, and add the leading dot os.path.splitext always
+    returns. Without this, an override entry typed as "TS" or "ts" (missing
+    the dot, or in the wrong case) matched nothing at all -- not even the
+    extension the author meant to exempt -- and since the override REPLACES
+    the whole default list, a one-character typo silently turned Rule 5 into
+    "police every file in the project." Returns None for a token that is
+    empty after trimming (e.g. a whitespace-only entry)."""
+    token = raw.strip().lower()
+    if not token:
+        return None
+    if not token.startswith("."):
+        token = "." + token
+    return token
+
+
+def _is_dotenv(rel):
+    """.env and its common siblings (.env.local, .env.production, ...) are
+    never code, regardless of their trailing "extension". os.path.splitext
+    treats a file's leading dot as part of the name, not as a separator, so
+    ".env.local" reports its extension as ".local" -- which is not in
+    IGNORED_EXT, and used to get denied. This check is unconditional, the
+    same way the no-extension check below is: a project's
+    ignored_extensions override should never be able to accidentally turn a
+    secrets file into a policed "code" file."""
+    name = os.path.basename(rel)
+    return name == ".env" or name.startswith(".env.")
 
 
 def is_policed(rel, arch):
     """True when this file counts as code for Rule 5."""
+    if _is_dotenv(rel):
+        return False
     _, ext = os.path.splitext(rel)
     if not ext:
         # No extension: LICENSE, Dockerfile, Makefile. Too noisy to police.
         return False
     override = cfi.str_list(arch.get("ignored_extensions"))
-    ignored = set(override) if override else IGNORED_EXT
+    if override:
+        normalized = {n for n in (_normalize_ext(o) for o in override) if n}
+        # Every entry normalized away to nothing (e.g. all whitespace) is a
+        # malformed config, not a deliberate "ignore nothing" instruction --
+        # fail open to the default list rather than policing everything.
+        ignored = normalized or IGNORED_EXT
+    else:
+        ignored = IGNORED_EXT
     return ext.lower() not in ignored
 
 
