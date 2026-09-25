@@ -123,3 +123,33 @@ Escalate instead:
 If the investigation ends up costing real time, record it in
 `docs/investigations/` with an index line (Rule 8) — the same bug is never paid
 for twice.
+
+## Rule 10 — Align before building a feature **[hook]**
+
+When a request would add behavior the project doesn't have yet, stop and offer
+the hidden decisions as **choices** before writing any code — implementation
+doesn't start on Claude's first reading of the request. A bug fix, a visual
+tweak, or a rename don't trigger this; those stay on the fast path.
+
+```
+fires:      "quero login com Google" · "adiciona carrinho" · "exportar em PDF"
+does not:   "arruma esse erro do console" · "muda a cor do botão" · "renomeia calcTotal"
+```
+
+Ask as **options to pick from, never an open question**: 2–4 decisions that
+actually change the outcome, each option carrying a one-line consequence, built
+from what a codebase / `docs/INDEX.md` search turns up first (Rule 7, done at
+the right time — before the options are drafted, not after). Once the user
+picks — or says "just go," which is honored and recorded, not repeated — write
+the decisions to `.claude-for-idiots/current-feature.json` before touching code.
+
+Force is configurable per project (`config.json` → `brainstorm.enforce`:
+`off` | `ask` | `deny`, default `ask`), and the user can always dismiss it for
+the current request. The full script — classifying, searching, phrasing the
+options, the term-mode handling — lives in `references/brainstorming.md`.
+
+The hook only catches one shape of miss: a new code file created with no
+alignment record at all. It can't read the prompt, so it can't itself tell a
+bug fix from a feature — that classification is the model's, from this rule.
+A feature built entirely inside files that already exist passes the hook
+untouched; known gaps are listed in `hooks/README.md`.
