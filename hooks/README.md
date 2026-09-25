@@ -65,3 +65,36 @@ specific line, never a whole command or repo, so they can't quietly cancel
 out Rule 6. **Never use them for a live credential** — only for test
 fixtures and documented examples that were never a real secret to begin
 with.
+
+## Known gaps
+
+These three hooks catch the common paths, not every path. Higher-level,
+beginner-facing gaps are in the main READMEs' "Known limitations" — these
+are the lower-level ones, for anyone extending or auditing the hooks:
+
+- **`allowlist_paths` never exempts unpushed git history**, only tracked
+  files on disk. A diff's hunks can't be reliably attributed back to a
+  single path per line, so extending the exemption there would risk
+  silently under-scanning history. Only `allow_patterns` and the inline
+  `# cfi:allow-secret` pragma reach history, because they match text
+  directly rather than a path.
+- **`scp -r .` / `rsync -av .` from the repo root copy `.git` itself**, not
+  just the files the scanner inspects — a literal history copy, not
+  something a file-by-file scan is positioned to catch.
+- **A brand-new branch with no upstream** falls back to scanning its last 50
+  commits, which can re-scan commits already published on another ref. Wasted
+  work, not a false negative.
+- **On Windows, the time budget on `allow_patterns` evaluation (a `SIGALRM`
+  based cap against a pathological regex in `config.json`) isn't available**;
+  a pattern-length cap applies everywhere as a second line of defence, but a
+  crafted regex could still run longer on Windows than on Linux/macOS.
+- **The aggregate glob-matching budget (`MAX_GLOB_MATCH_WORK`) is a constant
+  calibrated on ordinary hardware**, not a formal proof — on a much slower
+  machine, a large `allowed_paths`/`protected_paths` list could approach the
+  hook's own timeout instead of comfortably clearing it.
+- **`GIT_DIR`/`GIT_WORK_TREE` in the calling environment are explicitly
+  cleared** before every `git` subprocess call the hooks make, so a stray
+  value pointing at a different repository can't redirect the scan — this
+  used to be a gap and is called out here because it's easy to reintroduce
+  by adding a new `subprocess.run(["git", ...])` call without the same
+  explicit `env`.

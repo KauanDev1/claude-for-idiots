@@ -169,6 +169,37 @@ And it adapts to **you**:
 the hooks, so the rules keep working even in long sessions — not just while the
 skill is open.
 
+## Known limitations
+
+The **(checked)** items above are enforced by three small hook scripts, not
+a sandbox. They catch the common paths, not every path:
+
+- **Writes made from a shell command aren't inspected the same way.** A file
+  written via `Edit`/`Write`/`MultiEdit` is checked against the chosen
+  architecture; the same file created with a shell command (e.g.
+  `bash -c "cat > src/random/file.ts"`) is not — only `Bash` commands that
+  look like a *publish* step (`git push`, `npm publish`, `docker push`, …)
+  are inspected.
+- **The secrets scan can't reach a secret already sitting in a remote's
+  history from before this skill was installed.** It checks tracked files,
+  gitignored `.env` files on disk, and the commits about to be pushed — it
+  can't retroactively scrub something already pushed in an earlier commit.
+- **Architecture enforcement is driven by file extension and path glob.** A
+  file with no extension at all (`Dockerfile`, `Makefile`) is never policed,
+  by design — every code extension it does recognise (`.ts`, `.py`, `.mjs`,
+  `.astro`, `.sql`, `.sh`, …) is checked unless the project's config
+  explicitly ignores it.
+- **Flutter:** platform-specific config files (`AndroidManifest.xml`,
+  `Info.plist`, …) are allowed by default, but native plugin code under
+  `android/`/`ios/`/`macos/`/`linux/`/`windows/` (a new `.kt`/`.swift` file,
+  `project.pbxproj`) is still checked — on purpose, so a native layer can't
+  quietly bypass the Dart architecture. Add the specific path to
+  `architecture.allowed_paths` if you hit a false block while writing a
+  native plugin.
+
+See `hooks/README.md`'s "Known gaps" for the lower-level details (what a
+hook actually sees on each tool call, and the residual edge cases).
+
 ## Repository layout
 
 ```
