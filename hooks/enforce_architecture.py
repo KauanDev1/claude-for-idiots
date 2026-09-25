@@ -13,70 +13,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cfi_common as cfi
 
-# Inverted on purpose: policing an allow-list of extensions silently exempted
-# .mjs/.cjs/.astro/.sql/.sh, so Rule 5 did not apply to whole stacks the
-# catalog recommends. Anything that is not obviously prose, data or a binary
-# is treated as code.
-IGNORED_EXT = {
-    ".md", ".markdown", ".rst", ".txt", ".adoc",
-    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-    ".lock", ".csv", ".tsv", ".xml", ".env", ".example", ".sample",
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
-    ".woff", ".woff2", ".ttf", ".otf", ".eot",
-    ".pdf", ".zip", ".gz", ".tar", ".mp3", ".mp4", ".webm",
-    ".parquet", ".pkl",
-    ".bz2", ".7z", ".rar", ".xz",
-}
-
-
-def _normalize_ext(raw):
-    """Best-effort normalize one config-supplied extension token: trim
-    whitespace, lowercase, and add the leading dot os.path.splitext always
-    returns. Without this, an override entry typed as "TS" or "ts" (missing
-    the dot, or in the wrong case) matched nothing at all -- not even the
-    extension the author meant to exempt -- and since the override REPLACES
-    the whole default list, a one-character typo silently turned Rule 5 into
-    "police every file in the project." Returns None for a token that is
-    empty after trimming (e.g. a whitespace-only entry)."""
-    token = raw.strip().lower()
-    if not token:
-        return None
-    if not token.startswith("."):
-        token = "." + token
-    return token
-
-
-def _is_dotenv(rel):
-    """.env and its common siblings (.env.local, .env.production, ...) are
-    never code, regardless of their trailing "extension". os.path.splitext
-    treats a file's leading dot as part of the name, not as a separator, so
-    ".env.local" reports its extension as ".local" -- which is not in
-    IGNORED_EXT, and used to get denied. This check is unconditional, the
-    same way the no-extension check below is: a project's
-    ignored_extensions override should never be able to accidentally turn a
-    secrets file into a policed "code" file."""
-    name = os.path.basename(rel)
-    return name == ".env" or name.startswith(".env.")
-
-
-def is_policed(rel, arch):
-    """True when this file counts as code for Rule 5."""
-    if _is_dotenv(rel):
-        return False
-    _, ext = os.path.splitext(rel)
-    if not ext:
-        # No extension: LICENSE, Dockerfile, Makefile. Too noisy to police.
-        return False
-    override = cfi.str_list(arch.get("ignored_extensions"))
-    if override:
-        normalized = {n for n in (_normalize_ext(o) for o in override) if n}
-        # Every entry normalized away to nothing (e.g. all whitespace) is a
-        # malformed config, not a deliberate "ignore nothing" instruction --
-        # fail open to the default list rather than policing everything.
-        ignored = normalized or IGNORED_EXT
-    else:
-        ignored = IGNORED_EXT
-    return ext.lower() not in ignored
+# "is this a code file?" (IGNORED_EXT, the dotenv exemption, the
+# no-extension exemption, and the ignored_extensions override) lives in
+# _cfi_common.is_policed now -- require_feature_alignment.py (Rule 10) asks
+# the exact same question and must agree with Rule 5 on the answer, so
+# there is exactly one implementation instead of two that could drift.
 
 
 def main():
@@ -109,7 +50,7 @@ def main():
         cfi.allow()
 
     # Only police new code files. Let docs/config and edits-to-existing through.
-    if not is_policed(rel, arch):
+    if not cfi.is_policed(rel, arch.get("ignored_extensions")):
         cfi.allow()
 
     # An existing file is an edit, not a placement. Resolve against the

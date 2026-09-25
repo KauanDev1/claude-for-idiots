@@ -1,6 +1,6 @@
 # Hooks — the technical guardrails
 
-These three Python scripts add a technical check to rules 1, 5 and 6 on the paths Claude Code most often takes. They run as Claude Code `PreToolUse` hooks: before a tool call runs,
+These four Python scripts add a technical check to rules 1, 5, 6 and 10 on the paths Claude Code most often takes. They run as Claude Code `PreToolUse` hooks: before a tool call runs,
 the hook inspects it and can block it.
 
 | Hook | Rule | Matcher | Blocks when… |
@@ -8,6 +8,7 @@ the hook inspects it and can block it.
 | `block_migration_edits.py` | 1 | `Edit\|Write\|MultiEdit` | the target file matches a protected migration path |
 | `enforce_architecture.py` | 5 | `Write` | a **new code file** lands outside `architecture.allowed_paths` |
 | `scan_secrets_before_push.py` | 6 | `Bash` | a publishing command (push, `gh repo create`, …) and a tracked file looks like it holds a secret |
+| `require_feature_alignment.py` | 10 | `Write` | a **new code file** appears with no fresh `.claude-for-idiots/current-feature.json` record |
 
 ## How they're installed (by the skill)
 
@@ -28,7 +29,9 @@ During onboarding the skill:
     "permissionDecision":"deny","permissionDecisionReason":"…"}}
   ```
   Use `"ask"` instead of `"deny"` for a soft nudge (architecture hook honors
-  `architecture.enforce`: `deny` | `ask` | `off`).
+  `architecture.enforce`: `deny` | `ask` | `off`; the alignment hook honors
+  `brainstorm.enforce` the same way, except a *missing* `brainstorm`
+  section means `off` — see below — not `ask`).
 
 ## Requirements
 
@@ -68,10 +71,25 @@ with.
 
 ## Known gaps
 
-These three hooks catch the common paths, not every path. Higher-level,
+These four hooks catch the common paths, not every path. Higher-level,
 beginner-facing gaps are in the main READMEs' "Known limitations" — these
 are the lower-level ones, for anyone extending or auditing the hooks:
 
+- **`require_feature_alignment.py` never sees the user's prompt.**
+  `PreToolUse` only receives the tool call, so classifying a request as
+  "new feature" vs. "bug fix" is always the model's job, done by following
+  `references/brainstorming.md` — the hook only catches the one mechanical
+  case where that never happened: a brand-new code file with no alignment
+  record at all, or a stale one. A design decision is never enforced.
+- **`require_feature_alignment.py` never polices edits to an existing
+  file.** A feature built entirely inside files that already exist — no
+  new file created — passes the hook untouched, the same way
+  `enforce_architecture.py` treats an edit as out of scope.
+- **`require_feature_alignment.py` exempts every new test file
+  unconditionally**, by path convention (`tests/`, `test/`,
+  `integration_test/`, `*_test.*`, `*.spec.*`, …). This is deliberate — TDD
+  (Rule 2) writes the test first — but it means a new file that merely
+  *looks* like a test by naming convention also slips through.
 - **`allowlist_paths` never exempts unpushed git history**, only tracked
   files on disk. A diff's hunks can't be reliably attributed back to a
   single path per line, so extending the exemption there would risk

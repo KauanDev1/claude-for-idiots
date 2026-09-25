@@ -343,5 +343,105 @@ class TestTargetPath(unittest.TestCase):
         self.assertEqual(c.target_path(None), "")
 
 
+class TestLoadJsonFile(unittest.TestCase):
+    """load_config(cwd) is now a thin wrapper over load_json_file(path) --
+    these pin the generalized function's contract (bounded size/nesting,
+    OSError/malformed -> None, non-object top-level -> None), since a
+    second caller (require_feature_alignment.py, reading its own record
+    file at a config-supplied path) now depends on the exact same
+    guarantees load_config always had."""
+
+    def _write(self, tmp, name, content):
+        path = Path(tmp) / name
+        path.write_text(content, encoding="utf-8")
+        return str(path)
+
+    def test_missing_file_returns_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(c.load_json_file(str(Path(tmp) / "nope.json")))
+
+    def test_valid_object_is_returned(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "x.json", '{"a": 1}')
+            self.assertEqual(c.load_json_file(path), {"a": 1})
+
+    def test_non_object_top_level_returns_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            for content in ("[]", '"str"', "42", "null", "true"):
+                path = self._write(tmp, "x.json", content)
+                self.assertIsNone(c.load_json_file(path), content)
+
+    def test_invalid_json_returns_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "x.json", "{not json")
+            self.assertIsNone(c.load_json_file(path))
+
+    def test_deeply_nested_json_returns_none_quickly(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "x.json", "[" * 60000 + "]" * 60000)
+            start = time.monotonic()
+            result = c.load_json_file(path)
+            elapsed = time.monotonic() - start
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 5.0)
+
+    def test_load_config_is_load_json_file_at_the_config_path(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_dir = Path(tmp) / ".claude-for-idiots"
+            cfg_dir.mkdir()
+            (cfg_dir / "config.json").write_text('{"architecture": {}}')
+            self.assertEqual(c.load_config(tmp),
+                             c.load_json_file(str(cfg_dir / "config.json")))
+
+
+class TestIsPoliced(unittest.TestCase):
+    """Moved from enforce_architecture.py so require_feature_alignment.py
+    (Rule 10) can ask the exact same "is this code?" question instead of
+    re-deriving it. Rule 5's own test_hooks.py suite still exercises this
+    end to end through the real hook subprocess; these pin the shared
+    function's contract directly."""
+
+    def test_default_ignored_extensions_are_not_policed(self):
+        for name in ["notes.md", "data.json", "config.yml", "Cargo.lock",
+                     "logo.svg", "train.parquet", "model.pkl"]:
+            self.assertFalse(c.is_policed(name), name)
+
+    def test_common_code_extensions_are_policed(self):
+        for name in ["x.py", "x.ts", "x.mjs", "x.astro", "x.sql", "x.sh"]:
+            self.assertTrue(c.is_policed(name), name)
+
+    def test_extensionless_files_are_never_policed(self):
+        for name in ["Dockerfile", "LICENSE", "Makefile"]:
+            self.assertFalse(c.is_policed(name), name)
+
+    def test_dotenv_and_siblings_are_never_policed(self):
+        for name in [".env", ".env.local", ".env.production"]:
+            self.assertFalse(c.is_policed(name), name)
+
+    def test_dotenv_stays_exempt_under_a_narrow_override(self):
+        self.assertFalse(c.is_policed(".env.local", [".ts"]))
+
+    def test_override_replaces_the_default_list(self):
+        self.assertFalse(c.is_policed("x.ts", [".ts"]))
+        self.assertTrue(c.is_policed("notes.md", [".ts"]))
+
+    def test_override_normalizes_case_and_missing_dot(self):
+        self.assertFalse(c.is_policed("x.TS", ["ts"]))
+
+    def test_override_of_only_whitespace_falls_back_to_default(self):
+        self.assertFalse(c.is_policed("notes.md", ["   "]))
+        self.assertTrue(c.is_policed("x.ts", ["   "]))
+
+    def test_no_override_uses_default_list(self):
+        self.assertTrue(c.is_policed("x.ts", None))
+        self.assertTrue(c.is_policed("x.ts", []))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
