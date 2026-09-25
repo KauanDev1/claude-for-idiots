@@ -377,5 +377,35 @@ class TestRepoConsistency(unittest.TestCase):
             + "\n".join(failures))
 
 
+
+    def test_every_skill_path_reference_exists(self):
+        """Every repo file SKILL.md names in backticks is really there.
+
+        SKILL.md routes the model to other files by path -- the update
+        procedure, the rules, the glossary format. A pointer to a file that
+        does not exist sends it looking for instructions it will never find,
+        and nothing else in this suite notices: the prose still reads fine.
+        This is the same defect class as the dangling `references/` pointer
+        that reached the generated CLAUDE.md in 0.5.0, one level up.
+
+        Only paths that look like repo files are checked -- a path under a
+        user's project (`.claude-for-idiots/`, `docs/`, `.claude/`) is
+        created in THEIR tree, not this one, so it is skipped on purpose.
+        """
+        text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        # A bare filename (`CLAUDE.md`, `_cfi_common.py`) is either a file in
+        # the USER's project or a module named by basename, so only paths with
+        # a directory component are repo paths this test can resolve.
+        candidates = set(re.findall(
+            r"`([A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_./-]*\.(?:md|py|json))`", text))
+        user_tree = (".claude-for-idiots/", "docs/", ".claude/")
+        missing = sorted(
+            c for c in candidates
+            if not c.startswith(user_tree) and not (ROOT / c).exists()
+        )
+        self.assertEqual(
+            missing, [],
+            "SKILL.md points at repo files that do not exist: {}".format(missing))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
