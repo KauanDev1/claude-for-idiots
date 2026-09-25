@@ -72,7 +72,7 @@ Before writing the options text:
 Once the user picks (or answers the options directly):
 
 1. Write `.claude-for-idiots/current-feature.json` with the decisions and,
-   when known, where the feature will live.
+   when known, where the feature will live — see field-by-field shape below.
 2. **Only then** start implementing.
 3. For a feature substantial enough to matter later, also write
    `docs/features/YYYY-MM-DD-<slug>.md` and add its one-line pointer to
@@ -85,3 +85,41 @@ If the user says "just go" / "skip the questions" / the equivalent in the
 project's language, don't insist. Write the record anyway, with
 `skipped: true`, and proceed. A skip is a valid, respected alignment — not a
 bypass to route around.
+
+## The record: `.claude-for-idiots/current-feature.json`
+
+This file is the bridge between this script (text, interpretation) and the
+`require_feature_alignment.py` hook (code, a safety net — see the opening note
+in `references/rules.md`: hooks are a net, not a sandbox). Claude writes it
+after the user answers; the hook reads it before allowing a new code file.
+
+Full example: `assets/current-feature.example.json`.
+
+```json
+{
+  "slug": "login-google",
+  "recorded_at": "2026-09-25T14:03:00Z",
+  "head": "3db5115",
+  "decisions": [
+    "convive com o login de email/senha",
+    "guarda email, nome e foto"
+  ],
+  "target_paths": ["src/auth/**", "tests/auth/**"],
+  "doc": "docs/features/2026-09-25-login-google.md",
+  "skipped": false
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `slug` | Short identifier for the feature; also the doc filename's suffix when one is written. |
+| `recorded_at` | ISO-8601 timestamp of when the alignment happened. |
+| `head` | `git rev-parse --short HEAD` at the moment of recording. Once `HEAD` moves — e.g. Rule 3's commit for this very feature — the record is stale on its own; nothing has to remember to clear it. |
+| `decisions` | The choices the user made, one string each — what gets read back if anyone later asks "why does this work this way." |
+| `target_paths` | Optional. Glob(s) for where the feature will live. Lets a check against `architecture.allowed_paths` happen before a single file is written, while changing the plan is still free. |
+| `doc` | Optional. Path to the `docs/features/...` writeup, when one was written. |
+| `skipped` | `true` when the user chose the escape hatch (step 6). Treated as a valid, fresh alignment — not as "no alignment." |
+
+A record only counts as fresh for the `HEAD` it was written at — including a
+skipped one. That's deliberate: aligning (or skipping alignment) for this
+feature doesn't pre-authorize the next one once `HEAD` moves again.
