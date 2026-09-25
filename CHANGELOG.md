@@ -5,6 +5,43 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-25
+A new rule: Claude now pauses before building a feature you haven't described
+yet, instead of guessing at the decisions hidden inside your request.
+
+### Added
+- **Rule 10 — align before building a feature.** A request that would add
+  behavior the project doesn't have yet (a login method, a new export format,
+  a new panel) now stops before any code gets written: Claude searches the
+  codebase and `docs/INDEX.md` first, then lays out the decisions hidden in
+  that request as a short list of **options to pick from** — never an
+  open-ended question, never a wall of text. Once you pick (or say "just go
+  ahead"), that choice is written down so the same feature is never asked
+  about twice.
+  - **What still goes straight through, unchanged:** a bug fix, a visual
+    tweak, or a rename. Those were never the point of this rule and don't
+    trigger it.
+  - **It can be turned down, or up, per project.** `brainstorm.enforce` in
+    `.claude-for-idiots/config.json` is `off` / `ask` (the default on a new
+    project) / `deny`. A project set up before 0.5.0 has no `brainstorm`
+    section at all — it keeps behaving exactly as it did before you update,
+    because an absent section reads as `off`. The update flow never turns
+    this on by itself: it asks first, offering the same off/ask/deny choices,
+    and only writes the section once you've answered.
+  - **What the hook backing this rule does *not* catch.** It never sees your
+    prompt — a `PreToolUse` hook only sees the file being written — so
+    telling "new feature" from "bug fix" is still entirely Claude's judgment
+    call, not something this script enforces. What it catches is one narrow,
+    mechanical case: a brand-new code file appearing with no alignment
+    recorded at all. A feature built entirely inside files that already
+    exist, with no new file created, passes through with no pause, no
+    matter how large. And "is this a test file?" is decided by filename and
+    folder convention (`tests/`, `test/`, `spec/`, `foo_test.py`,
+    `foo.spec.ts`, …), not by what the file actually does — deliberate, so
+    the rule never fights test-first development, but it also means a file
+    that merely *looks* like a test by that convention slips through the
+    same way a real one does.
+
 ## [0.4.0] — 2026-09-25
 Ground-up reliability pass on the three enforcement hooks (Rules 1, 5, 6). An
 audit of real projects found that the hooks blocked legitimate files and

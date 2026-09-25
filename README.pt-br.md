@@ -147,6 +147,10 @@ itens marcados com **(checado)** são checados por um hook — um script bloquei
   jogado em qualquer canto.
 - **Segredos nunca vão pra internet** *(checado)* — chaves/senhas ficam num
   `.env` local; tudo que publica é varrido antes.
+- **Para numa feature nova pra colocar as decisões escondidas na mesa antes**
+  *(checado)* — apresenta elas como opções pra você escolher antes de
+  escrever qualquer código; conserto de bug, ajuste visual e renomeação
+  continuam passando direto.
 - **Sempre escreve testes** — e pergunta antes de rodar a suíte completa (que é
   lenta).
 - **Faz commit a cada feature** — pra você nunca perder progresso.
@@ -178,7 +182,7 @@ até em sessões longas — não só enquanto a skill está aberta.
 
 ## Limitações conhecidas
 
-Os itens marcados **(checado)** acima são reforçados por três scripts-hook
+Os itens marcados **(checado)** acima são reforçados por quatro scripts-hook
 pequenos, não por uma sandbox. Eles pegam os caminhos mais comuns, não todos:
 
 - **Escrita feita por comando de shell não é inspecionada do mesmo jeito.**
@@ -205,6 +209,18 @@ pequenos, não por uma sandbox. Eles pegam os caminhos mais comuns, não todos:
   Dart quieta. Adicione o caminho específico em
   `architecture.allowed_paths` se você tomar um bloqueio indevido
   escrevendo um plugin nativo.
+- **O check de alinhamento de feature (Regra 10) não vê o seu pedido, só o
+  arquivo sendo escrito.** Distinguir "feature nova" de "conserto de bug" é
+  julgamento do Claude, não algo que um script reforça — o hook só pega um
+  caso mecânico e estreito: um arquivo de código novo aparecendo sem nenhum
+  alinhamento registrado. Uma feature construída inteira dentro de arquivos
+  que já existem, sem nenhum arquivo novo criado, passa sem parar, por maior
+  que seja.
+- **"É arquivo de teste?" é decidido por convenção de nome e pasta**
+  (`tests/`, `test/`, `spec/`, `foo_test.py`, `foo.spec.ts`, …), não pelo que
+  o arquivo realmente faz — de propósito, pra Regra 10 nunca brigar com
+  desenvolvimento test-first. Também significa que um arquivo que só
+  *parece* teste por essa convenção passa igual a um de verdade.
 
 Veja "Known gaps" em `hooks/README.md` pros detalhes de nível mais baixo (o
 que cada hook realmente vê em cada chamada de ferramenta, e os casos de
