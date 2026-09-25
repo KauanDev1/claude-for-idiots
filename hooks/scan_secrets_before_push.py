@@ -4,9 +4,11 @@
 PreToolUse hook (matcher: Bash). When a command publishes anything -- git push
 (any global flags), gh (repo create/edit, release, pr create, gist create),
 package registries (npm/pnpm/yarn/bun/poetry/cargo/flit publish, twine
-upload), docker push, hosting deploys (vercel/netlify/firebase/flyctl/fly/
-surge/amplify/wrangler), or raw file transfer (scp/rsync/aws s3 cp/sync) --
-scan the repo's git-tracked files for obvious secrets and for a tracked .env.
+upload), docker/docker-compose/helm push, hosting deploys (vercel/
+netlify/firebase/flyctl/fly/surge/amplify/wrangler/gcloud run deploy/az
+webapp up), or raw file transfer (scp/rsync/sftp/curl -T/aws s3 cp,sync,
+s3api put-object) -- scan the repo's git-tracked files for obvious secrets
+and for a tracked .env.
 Blocks the command if anything is found. Fails open on every other command.
 
 This is a deliberately simple, extendable scanner — add patterns as needed.
@@ -19,39 +21,152 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cfi_common as cfi
 
-# Matches only "git ... push", not any other publishing command -- kept
-# separate (rather than inlined into PUBLISH_RE below) so a future hook that
-# needs to tell "this is specifically a git push" apart from "this is some
-# other kind of publish" (git never sends a gitignored file; scp/vercel/etc.
-# upload the whole working directory, gitignored or not) can reuse it instead
-# of writing a second copy. `[^|;&]*?` -- any run of characters that isn't a
-# shell separator -- absorbs git's own global flags (`-C .`, `--git-dir=`,
-# `-c k=v`) between `git` and `push` without crossing into a chained command
-# (`git status && ls push` must NOT match).
-GIT_PUSH_RE = re.compile(r"\bgit\b[^|;&]*?\bpush\b")
+# Word-level building blocks for the two ordered-pair checks below (git...
+# push, and hosting-trigger...deploy). Case-insensitive because a shell
+# doesn't care and neither should this.
+_GIT_WORD_RE = re.compile(r"\bgit\b", re.I)
+_PUSH_WORD_RE = re.compile(r"\bpush\b", re.I)
+_HOSTING_TRIGGER_RE = re.compile(
+    r"\b(?:vercel|netlify|firebase|flyctl|fly|surge|amplify)\b", re.I)
+# Deliberately no \b around --prod (mirrors the pre-existing target set --
+# this file has never required a word boundary before the leading '-').
+_HOSTING_TARGET_RE = re.compile(r"deploy|publish|--prod", re.I)
 
-# The whole publish surface, not just git/gh: package registries (npm/pnpm/
-# yarn/bun/poetry/cargo/flit/twine), container registries (docker push),
-# hosting platforms (vercel/netlify/firebase/flyctl/fly/surge/amplify,
-# wrangler), and raw file transfer (scp/rsync/aws s3). An audit of twelve
-# real publishing commands found eleven passing through the old regex
-# untouched, and `git push` itself dodged by any global flag placed before
-# the subcommand. Case-insensitive because a shell doesn't care and neither
-# should this.
-PUBLISH_RE = re.compile(r"""(?xi)
-      """ + GIT_PUSH_RE.pattern + r"""
-    | \bgh\s+(?: repo\s+(?:create|edit)
+
+def _ordered_pair_in_clause(clause, first_re, second_re):
+    """True if `first_re` matches somewhere in `clause` AND `second_re`
+    matches somewhere AFTER that match -- checked from `first_re`'s
+    LEFTMOST occurrence only, not from every occurrence.
+
+    This is the fix for task-9b's CRITICAL 2: the code this replaced --
+    `\\bgit\\b[^|;&]*?\\bpush\\b` and `\\b(?:vercel|...)\\b(?=[^|;&]*(?:deploy
+    |publish|--prod))` -- re-scanned forward to the end of the clause from
+    EVERY occurrence of the trigger word, an O(n^2) blowup when the trigger
+    repeats and the target never appears (a heredoc or log mentioning "git"
+    or "fly" thousands of times took 20-45s; see task-9b-report.md for the
+    measured curve). Checking only the leftmost occurrence is sound, not
+    just faster: if `second_re` doesn't occur anywhere after the FIRST
+    occurrence of `first_re`, it cannot occur after any LATER occurrence
+    either -- the search space after a later position is strictly smaller.
+    So one leftmost search plus one forward search from there (both O(n),
+    no backtracking blowup) captures exactly the same "some occurrence of
+    first_re has second_re after it" condition the old lazy/lookahead scan
+    was computing the expensive way.
+    """
+    m = first_re.search(clause)
+    if not m:
+        return False
+    return bool(second_re.search(clause, m.end()))
+
+
+def _clauses(command):
+    """`command` split on shell control operators (|, ;, &) -- the same
+    boundary the ordered-pair ("git push", hosting-trigger-then-deploy")
+    checks must not cross (`git status && ls push` must NOT match). Used
+    so those checks -- and the plain publish patterns below, which are
+    self-contained and never need to cross this boundary either -- only
+    ever look within one clause at a time.
+    """
+    return re.split(r"[|;&]+", command)
+
+
+def is_git_push(blanked_command):
+    """True if any clause of `blanked_command` (already run through
+    `blank_quoted`) invokes `git ... push` -- git's own global flags
+    (`-C .`, `--git-dir=`, `-c k=v`) between `git` and `push` are absorbed
+    by the ordered-pair check the same way the old `[^|;&]*?` gap did,
+    just without its quadratic cost.
+    """
+    return any(_ordered_pair_in_clause(c, _GIT_WORD_RE, _PUSH_WORD_RE)
+               for c in _clauses(blanked_command))
+
+
+def _is_hosting_deploy(blanked_command):
+    return any(_ordered_pair_in_clause(c, _HOSTING_TRIGGER_RE, _HOSTING_TARGET_RE)
+               for c in _clauses(blanked_command))
+
+
+# Registries that support a --dry-run (or equivalent) flag which performs
+# every check but never actually sends anything -- task-9b review,
+# Important: `cargo publish --dry-run` / `npm publish --dry-run` were
+# blocked despite never publishing. Scoped per-clause (see
+# _is_registry_publish) so a dry run of one command never suppresses a real
+# publish chained alongside it.
+_REGISTRY_PUBLISH_RE = re.compile(
+    r"\b(?:npm|pnpm|yarn|bun|poetry|cargo|flit)\s+publish\b", re.I)
+_DRY_RUN_RE = re.compile(r"--dry-run\b", re.I)
+
+
+def _is_registry_publish(clause):
+    return bool(_REGISTRY_PUBLISH_RE.search(clause)) and not _DRY_RUN_RE.search(clause)
+
+
+# curl's upload flag (-T/--upload-file) sends a local file TO a remote
+# server -- task-9b review, "Important". Checked as two independent,
+# order-agnostic scans (not a single pattern joining them with `.*`) so
+# this can never become a third quadratic construct: `curl` and `-T`
+# appearing anywhere in the same clause is already a narrow enough signal
+# without requiring a particular order between them.
+_CURL_RE = re.compile(r"\bcurl\b", re.I)
+_CURL_UPLOAD_FLAG_RE = re.compile(r"(?:^|\s)(?:-T|--upload-file)(?:\s|$)", re.I)
+
+# The rest of the publish surface: self-contained, fixed-width alternatives
+# that never need the ordered-pair treatment above because none of them
+# rely on scanning an unbounded gap to a separately-occurring word -- each
+# one is anchored to characters immediately adjacent to itself. An audit of
+# twelve real publishing commands originally found eleven passing through
+# untouched; task-9b's review added docker compose push / docker-compose
+# push, helm push, aws s3api put-object, gcloud run deploy, and az webapp up
+# (sftp and curl's upload flag are handled separately below).
+PUBLISH_RE_PLAIN = re.compile(r"""(?xi)
+      \bgh\s+(?: repo\s+(?:create|edit)
                | release\b
                | pr\s+create
                | gist\s+create )
-    | \b(?:npm|pnpm|yarn|bun|poetry|cargo|flit)\s+publish\b
     | \btwine\s+upload\b
+    | \bdocker(?:-compose|\s+compose)\s+push\b
     | \bdocker\s+push\b
-    | \b(?:vercel|netlify|firebase|flyctl|fly|surge|amplify)\b(?=[^|;&]*(?:deploy|publish|--prod))
+    | \bhelm\s+push\b
     | \bwrangler\s+(?:deploy|publish)\b
-    | \b(?:scp|rsync)\s
+    | \b(?:scp|rsync|sftp)\s
     | \baws\s+s3\s+(?:cp|sync)\b
+    | \baws\s+s3api\s+put-object\b
+    | \bgcloud\s+run\s+deploy\b
+    | \baz\s+webapp\s+up\b
 """)
+
+
+def is_publish_command(blanked_command):
+    """True if `blanked_command` (already run through `blank_quoted`)
+    invokes anything on the publish surface: git push, a hosting-platform
+    deploy, a registry publish (not a --dry-run), a curl upload, or any of
+    the other self-contained patterns above.
+    """
+    if is_git_push(blanked_command):
+        return True
+    for clause in _clauses(blanked_command):
+        if not clause:
+            continue
+        if _is_hosting_deploy(clause):
+            return True
+        if PUBLISH_RE_PLAIN.search(clause):
+            return True
+        if _is_registry_publish(clause):
+            return True
+        if _CURL_RE.search(clause) and _CURL_UPLOAD_FLAG_RE.search(clause):
+            return True
+    return False
+
+
+# Defense in depth alongside the algorithmic fix above: even at O(n), a
+# shell command line has no legitimate reason to run past this many
+# characters, and this bounds the (now linear, but still real) cost of
+# blank_quoted + is_publish_command against a pathologically large
+# `command` -- a multi-MB heredoc or embedded log -- regardless of how fast
+# the underlying scan is. "cap alone just moves the limit" per the review,
+# which is why this is paired with the quadratic-cost fix, not a
+# replacement for it.
+MAX_COMMAND_CHARS = 2_000_000
 
 SECRET_PATTERNS = [
     ("AWS access key id", re.compile(r"AKIA[0-9A-Z]{16}")),
@@ -227,40 +342,178 @@ def env_files_on_disk(root):
     return found
 
 
-def blank_quoted(command):
-    """`command` with the CONTENTS of every '...'/"..." span replaced by
-    spaces, quote characters themselves kept in place.
+# Programs that treat their next quoted argument as a command STRING to
+# execute, rather than as free text -- task-9b review, CRITICAL 1:
+# `bash -c "git push origin main"` used to have its payload blanked away
+# like any other quoted span, and is_publish_command() never got to see
+# it. Content quoted here IS the command being run and must be scanned,
+# not blanked.
+# Only a short, fixed-size window immediately before the quote is checked
+# (see _is_exec_arg) rather than the whole preceding command, so this stays
+# O(1) per quote no matter how long `command` is -- scanning an unbounded
+# prefix per quote would reintroduce a CRITICAL-2-shaped cost for a command
+# containing many quoted spans.
+EXEC_ARG_RE = re.compile(r"""(?xi)
+      \b(?:bash|sh|zsh|dash|ksh|ash)\s+-c\s*=?\s*$
+    | \beval\s*$
+    | \bssh\s+\S+\s*$
+""")
 
-    PUBLISH_RE's whole point is to tell "this command publishes something"
-    from free text sitting in an argument -- and the single most common
-    free-text argument in a git workflow is a commit message. Without this,
-    `git commit -m "add push notification support"` matches PUBLISH_RE: the
-    word "push" sits right after "git" with nothing but ordinary characters
-    (no `|`, `;`, `&`) in between, exactly what the publish patterns are
-    built to tolerate (git's own global flags, docker's registry path, ...).
-    Blanking quoted content first means a publish-shaped word only counts
-    when it is actually part of the command being invoked, not part of what
-    a flag's value says. This helps every alternative in PUBLISH_RE, not
-    just git -- "remember to npm publish next week" in a commit message is
-    exactly as much a false positive as the push case.
+# Fixed lookback window (characters), not the whole prefix -- see EXEC_ARG_RE.
+_EXEC_LOOKBACK = 80
 
-    Deliberately not real shell parsing (no backslash-escape handling, no
-    distinguishing single- from double-quote semantics): an unterminated
-    quote just blanks to the end of the string, which only ever suppresses a
-    potential match, never manufactures one out of quoted text -- the safe
-    direction for a fail-open hook.
+# Hard cap on quote-recursion depth (see blank_quoted). Bounds the worst
+# case -- a command crafted as many nested `bash -c "bash -c "..."` wrappers
+# -- to O(depth * len(command)) instead of a nesting-depth-proportional
+# O(len(command)^2); real commands never nest anywhere close to this deep.
+MAX_QUOTE_RECURSION = 20
+
+
+def _quote_span_end(s, start, quote):
+    """Index of the matching closing `quote` character, scanning from
+    `start` (just after the opening quote). Returns len(s) if the quote is
+    never closed (falls off the end) -- same "unterminated blanks to the
+    end of the string" behavior blank_quoted has always had.
+
+    Only DOUBLE-quote spans honor backslash-escaping (`\\"` is a literal
+    quote, not the end of the span) -- matching real shell semantics: a
+    real shell never lets a backslash escape a single quote (there is no
+    way to put a literal `'` inside a `'...'` span at all), but it does let
+    `\\"` inside a `"..."` span stay literal. The previous implementation
+    treated both quote kinds identically and closed on ANY matching quote
+    character regardless of a preceding backslash -- which let an escaped
+    quote inside a -m message end quote-tracking early, re-exposing the
+    rest of the message as if it sat outside the message entirely and
+    fabricating a match (task-9b review, "Important": `git commit -m
+    "rename \\"push\\" button"` produced a match that isn't there in the
+    real shell command, contradicting this function's own "only suppress,
+    never fabricate" contract).
+    """
+    i, n = start, len(s)
+    while i < n:
+        c = s[i]
+        if quote == '"' and c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == quote:
+            return i
+        i += 1
+    return n
+
+
+def _unescape_dquote(s):
+    """Reverse the escaping a shell applies inside a double-quoted string
+    (`\\"` -> `"`, `\\\\` -> `\\`, ...). Used only when recursing into a
+    quoted command argument (`bash -c "..."`) so the string handed to the
+    recursive blank_quoted call matches what the shell would actually run,
+    not what's still typed with escape backslashes in front of it.
     """
     out = []
-    quote = None
-    for ch in command:
-        if quote:
-            out.append(ch if ch == quote else " ")
-            if ch == quote:
-                quote = None
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n:
+            out.append(s[i + 1])
+            i += 2
             continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _is_exec_arg(command, quote_pos):
+    """True if the quote opening at `quote_pos` is the argument to a
+    program that will execute its contents as a shell command."""
+    window = command[max(0, quote_pos - _EXEC_LOOKBACK):quote_pos]
+    return bool(EXEC_ARG_RE.search(window))
+
+
+def blank_quoted(command, _depth=0):
+    """`command` with the CONTENTS of every '...'/"..." span replaced by
+    spaces (quote characters themselves kept in place) -- EXCEPT a span
+    that is itself a command about to be executed (the argument to
+    `bash -c`/`sh -c`/`ssh host`/`eval`/...), which is scanned instead,
+    recursively, so a publish command nested behind any number of these
+    wrappers is still found.
+
+    is_publish_command()'s whole point is to tell "this command publishes something"
+    from free text sitting in an argument -- and the single most common
+    free-text argument in a git workflow is a commit message. Without any
+    blanking, `git commit -m "add push notification support"` would match:
+    the word "push" sits right after "git" with nothing but ordinary
+    characters in between, exactly what the publish patterns are built to
+    tolerate (git's own global flags, docker's registry path, ...).
+    Blanking quoted content by default means a publish-shaped word only
+    counts when it is actually part of the command being invoked, not part
+    of what a flag's value says -- this covers every alternative, not just
+    git ("remember to npm publish next week" in a commit message is exactly
+    as much a false positive as the push case).
+
+    task-9b review, CRITICAL 1: the previous version blanked EVERY quoted
+    span this same way, with no exception -- so `bash -c "git push origin
+    main"`, `sh -c '...'`, and `ssh host "..."` all had their payload
+    erased before is_publish_command() ever ran, a silent bypass of the whole rule.
+    These three (plus `eval`) are the exception: the quote is not prose
+    describing a command, it IS the command, so it is scanned (via
+    recursion, so a nested `bash -c "ssh host 'git push ...'"` is still
+    caught, and a message flag nested INSIDE a wrapper -- `bash -c "git
+    commit -m 'mentions npm publish'"` -- still gets its own blanking
+    applied at that inner level rather than being left raw just because it
+    sits inside an outer wrapper).
+
+    Recursion depth is capped (MAX_QUOTE_RECURSION) and the exec-context
+    check only looks at a small fixed window before each quote (see
+    _is_exec_arg) -- both defend against the CRITICAL-2 class of cost
+    reappearing here via a specially crafted, deeply-nested input.
+
+    Still not real shell parsing (single/double quote nesting rules are
+    approximated, not exact), but an unterminated quote still blanks to the
+    end of the string either way -- suppressing a potential match, never
+    manufacturing one out of quoted text.
+    """
+    out = []
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
         if ch in ("'", '"'):
             quote = ch
+            content_start = i + 1
+            close = _quote_span_end(command, content_start, quote)
+            inner = command[content_start:close]
+            terminated = close < n
+
+            if _is_exec_arg(command, i):
+                if _depth < MAX_QUOTE_RECURSION:
+                    recurse_src = _unescape_dquote(inner) if quote == '"' else inner
+                    scanned = blank_quoted(recurse_src, _depth + 1)
+                else:
+                    # Recursion budget exhausted, but this quote is STILL
+                    # a command being executed (_is_exec_arg said so) --
+                    # unlike the plain "blank by default" case below, the
+                    # fail-open-safe direction here is to leave it raw for
+                    # the caller's flat regex scan to see, not to blank it.
+                    # Blanking would suppress a genuine publish command
+                    # past whatever nesting depth an attacker chose to
+                    # exhaust the budget with -- recreating CRITICAL 1 at
+                    # the depth cap's edge instead of closing it. Message
+                    # flags nested this deep inside a wrapper (vanishingly
+                    # unlikely in practice) stay unblanked too, at worst
+                    # trading a false positive for never fabricating a
+                    # false negative.
+                    scanned = inner
+            else:
+                scanned = " " * len(inner)
+
+            out.append(quote)
+            out.append(scanned)
+            if terminated:
+                out.append(quote)
+                i = close + 1
+            else:
+                i = close
+            continue
         out.append(ch)
+        i += 1
     return "".join(out)
 
 
@@ -276,20 +529,24 @@ def main():
         # Pre-existing gap, not introduced here: `tool_input.command` is
         # attacker/tool-influenced input, same as everything else read from
         # the event. A non-string value (a malformed or hostile event) used
-        # to reach PUBLISH_RE.search() directly and raise TypeError --
+        # to reach is_publish_command() directly and raise TypeError --
         # crashing the hook with a non-zero exit instead of failing open.
         cfi.allow()
+    if len(command) > MAX_COMMAND_CHARS:
+        # See MAX_COMMAND_CHARS -- bounds worst-case cost regardless of how
+        # large an arbitrary `command` string gets.
+        command = command[:MAX_COMMAND_CHARS]
     blanked = blank_quoted(command)
-    if not PUBLISH_RE.search(blanked):
+    if not is_publish_command(blanked):
         cfi.allow()
 
-    # Reused (not recomputed) from GIT_PUSH_RE -- applied to the same
-    # quote-blanked command as PUBLISH_RE above, for the identical reason:
-    # a commit message mentioning "git push" in prose must not count.
-    # Getting this right matters in BOTH directions below, not just one --
-    # a false "yes" here skips the .env check (env_files_on_disk), a false
-    # "no" skips the history check (unpushed_diff).
-    is_git_push = bool(GIT_PUSH_RE.search(blanked))
+    # Applied to the same quote-blanked command as is_publish_command
+    # above, for the identical reason: a commit message mentioning "git
+    # push" in prose must not count. Getting this right matters in BOTH
+    # directions below, not just one -- a false "yes" here skips the .env
+    # check (env_files_on_disk), a false "no" skips the history check
+    # (unpushed_diff).
+    is_git_push_command = is_git_push(blanked)
 
     cwd = event.get("cwd") or os.getcwd()
     root = repo_root(cwd) or cwd
@@ -317,7 +574,7 @@ def main():
     # docker build, scp, rsync, ...) uploads the whole working directory,
     # ignored or not. Scoped to non-git-push specifically so this can never
     # block a `git push` over a secret that command genuinely cannot leak.
-    if not is_git_push:
+    if not is_git_push_command:
         for rel in env_files_on_disk(root):
             findings.append(f"{rel}: local .env would be uploaded by this command")
 
@@ -327,7 +584,7 @@ def main():
     # git-push specifically: none of the other publishing paths transmit
     # git history at all (npm/vercel/docker/etc. ship built artifacts, and
     # `.git` is excluded by every one of their own default ignore rules).
-    if is_git_push:
+    if is_git_push_command:
         history = unpushed_diff(root)
         for label, pattern in SECRET_PATTERNS:
             if pattern.search(history):
