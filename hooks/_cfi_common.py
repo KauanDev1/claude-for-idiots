@@ -86,15 +86,26 @@ def read_event():
     return event if isinstance(event, dict) else None
 
 
-def load_config(cwd):
-    """Read the project config. None means: fail open."""
+def load_json_file(path):
+    """Read and parse an arbitrary JSON file at an absolute path. None on
+    ANY problem -- missing, unreadable, oversized, too deeply nested,
+    invalid JSON, or a top-level value that isn't a JSON object -- fail
+    open, always. `load_config` is defined in terms of this; a second
+    caller (the Rule 10 hook, reading its own record file at a
+    config-supplied path) reuses the exact same bounded, defensive
+    contract instead of re-implementing it."""
     try:
-        with open(os.path.join(cwd, CONFIG_REL), encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             raw = handle.read(MAX_JSON_CHARS + 1)
     except (OSError, ValueError, UnicodeDecodeError):
         return None
-    config = _safe_json_loads(raw)
-    return config if isinstance(config, dict) else None
+    parsed = _safe_json_loads(raw)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def load_config(cwd):
+    """Read the project config. None means: fail open."""
+    return load_json_file(os.path.join(cwd, CONFIG_REL))
 
 
 def section(config, name):
@@ -454,6 +465,80 @@ def matches_any(rel_path, patterns, *, on_incomplete=False):
         if compiled.match(rel_path):
             return True
     return False
+
+
+# Inverted on purpose: policing an allow-list of extensions silently exempted
+# .mjs/.cjs/.astro/.sql/.sh, so Rule 5 did not apply to whole stacks the
+# catalog recommends. Anything that is not obviously prose, data or a binary
+# is treated as code. Shared between enforce_architecture.py (Rule 5) and
+# require_feature_alignment.py (Rule 10) -- both ask the same "is this a
+# code file?" question, for different reasons, and must agree on the answer.
+IGNORED_EXT = {
+    ".md", ".markdown", ".rst", ".txt", ".adoc",
+    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".lock", ".csv", ".tsv", ".xml", ".env", ".example", ".sample",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".pdf", ".zip", ".gz", ".tar", ".mp3", ".mp4", ".webm",
+    ".parquet", ".pkl",
+    ".bz2", ".7z", ".rar", ".xz",
+}
+
+
+def _normalize_ext(raw):
+    """Best-effort normalize one config-supplied extension token: trim
+    whitespace, lowercase, and add the leading dot os.path.splitext always
+    returns. Without this, an override entry typed as "TS" or "ts" (missing
+    the dot, or in the wrong case) matched nothing at all -- not even the
+    extension the author meant to exempt -- and since the override REPLACES
+    the whole default list, a one-character typo silently turned Rule 5 into
+    "police every file in the project." Returns None for a token that is
+    empty after trimming (e.g. a whitespace-only entry)."""
+    token = raw.strip().lower()
+    if not token:
+        return None
+    if not token.startswith("."):
+        token = "." + token
+    return token
+
+
+def _is_dotenv(rel):
+    """.env and its common siblings (.env.local, .env.production, ...) are
+    never code, regardless of their trailing "extension". os.path.splitext
+    treats a file's leading dot as part of the name, not as a separator, so
+    ".env.local" reports its extension as ".local" -- which is not in
+    IGNORED_EXT, and used to get denied. This check is unconditional, the
+    same way the no-extension check below is: a project's
+    ignored_extensions override should never be able to accidentally turn a
+    secrets file into a policed "code" file."""
+    name = os.path.basename(rel)
+    return name == ".env" or name.startswith(".env.")
+
+
+def is_policed(rel, ignored_override=None):
+    """True when this file counts as code for Rule 5 (and Rule 10, which
+    reuses this exact notion of "code" rather than re-deriving it).
+
+    `ignored_override` is an optional config-supplied list of extension
+    tokens (e.g. `architecture.ignored_extensions`) that REPLACES the
+    default IGNORED_EXT set when it normalizes to something non-empty.
+    """
+    if _is_dotenv(rel):
+        return False
+    _, ext = os.path.splitext(rel)
+    if not ext:
+        # No extension: LICENSE, Dockerfile, Makefile. Too noisy to police.
+        return False
+    override = str_list(ignored_override)
+    if override:
+        normalized = {n for n in (_normalize_ext(o) for o in override) if n}
+        # Every entry normalized away to nothing (e.g. all whitespace) is a
+        # malformed config, not a deliberate "ignore nothing" instruction --
+        # fail open to the default list rather than policing everything.
+        ignored = normalized or IGNORED_EXT
+    else:
+        ignored = IGNORED_EXT
+    return ext.lower() not in ignored
 
 
 def relativize(file_path, cwd):
