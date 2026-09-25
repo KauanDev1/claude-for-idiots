@@ -10,6 +10,7 @@ no config -> ALLOW (fail open).
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,16 @@ BRAINSTORM_CONFIG_OFF = {"brainstorm": {"enforce": "off"}}
 # ask" default from the plan's enforce convention table.
 BRAINSTORM_CONFIG_DEFAULT = {"brainstorm": {}}
 
+
+
+# secrets.allow_patterns is only evaluated where a runaway regex can be
+# interrupted (signal.SIGALRM: Linux, macOS). On Windows the hook drops the
+# field on purpose -- see hooks/README.md "Known gaps" -- so a test that
+# asserts a pattern EXEMPTS something is asserting platform behavior that
+# does not exist there. The tests that assert the hook stays SAFE
+# (no stall, no crash, no hiding a different secret) still run everywhere,
+# which is the half that matters on a platform without the feature.
+ALLOW_PATTERNS_SUPPORTED = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
 
 
 def bash_can_check_syntax():
@@ -766,6 +777,8 @@ class TestSecretAllowlist(TempProject):
 
     # -- secrets.allow_patterns: content-based exemption from config.json --
 
+    @unittest.skipUnless(ALLOW_PATTERNS_SUPPORTED,
+                         "secrets.allow_patterns is not evaluated without SIGALRM")
     def test_allow_pattern_exempts_the_known_aws_example_key(self):
         self._repo("fixtures.py", 'K = "AKIAIOSFODNN7EXAMPLE"\n')
         self.write_config({"secrets": {"allow_patterns": ["AKIAIOSFODNN7EXAMPLE"]}})
