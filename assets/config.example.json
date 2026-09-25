@@ -21,6 +21,10 @@
     },
     "enforce": "ask"
   },
+  "brainstorm": {
+    "enforce": "ask",
+    "record": ".claude-for-idiots/current-feature.json"
+  },
   "migrations": {
     "tool": "prisma",
     "command": "npx prisma migrate dev --name describe_change",
