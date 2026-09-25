@@ -123,8 +123,8 @@ After stack/architecture are settled:
    `tests`, etc. — the hooks read these. Record
    `skill_version` from this skill's `VERSION` file (updates use it to know
    where the project is starting from).
-3. Create `<project>/.claude/hooks/` and copy the four files from this
-   skill's `hooks/` directory (the three hooks plus `_cfi_common.py`, which
+3. Create `<project>/.claude/hooks/` and copy the five files from this
+   skill's `hooks/` directory (the four hooks plus `_cfi_common.py`, which
    they import) into it.
 4. Merge `assets/settings.template.json` into `<project>/.claude/settings.json`
    (preserve any existing hooks/keys).
