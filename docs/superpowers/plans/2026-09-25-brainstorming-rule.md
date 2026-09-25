@@ -44,7 +44,7 @@ Classes de entrada que este plano implica, que nenhuma tarefa exercitaria por pa
 5. **Arquivo novo que é teste** — `tests/test_x.py` durante TDD é o caminho normal da Regra 2. Se o hook bloquear, briga com a regra vizinha. → Tarefa 5, decisão explícita.
 6. **Registro malformado** vindo de edição manual (`{}`, lista, string, JSON inválido, aninhamento profundo). → Tarefa 5.
 7. **Caminho não-ASCII** (`src/configuração.py`) — público-alvo brasileiro. → Tarefa 5.
-8. **`enforce` com valor inválido** (`"DENY"`, `true`, `null`) — espelhar o ruling da Regra 5: valor malformado cai em `ask`, não em `off` nem em `deny`. → Tarefa 5.
+8. **`enforce` com valor inválido** (`"DENY"`, `true`, `null`, `42`) — cai em `off`/allow. Medido no código da Regra 5, que faz exatamente isso hoje (`mode not in ("deny","ask") -> cfi.allow()`). O plano afirmava o contrário; corrigido. A constituição do projeto manda entrada inesperada resultar em `exit 0` sem saída, e `ask` não é isso. → Tarefa 5.
 
 ---
 
@@ -214,6 +214,15 @@ git commit -m "feat(rule10): carry the alignment rule into generated CLAUDE.md"
   "record": ".claude-for-idiots/current-feature.json"
 }
 ```
+
+**Convenção completa de `enforce`** — medida no código da Regra 5, não suposta:
+
+| entrada | resultado | por quê |
+|---|---|---|
+| seção `brainstorm` ausente | `off` | feature nova; projeto em 0.4.0 não pode ganhar prompt que nunca pediu. É a ÚNICA divergência deliberada da Regra 5, que usa `ask` para chave ausente |
+| seção presente, `enforce` ausente | `ask` | o usuário optou por ter a seção |
+| `"deny"` / `"ask"` / `"off"` | como nomeado | |
+| qualquer outro valor | `off` | fail-open. É o que a Regra 5 faz hoje, verificado |
 
 - [ ] **Step 2: Registrar o quarto hook**
 
