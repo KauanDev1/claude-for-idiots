@@ -231,7 +231,8 @@ borda residuais).
 ```
 SKILL.md                     # o cérebro da skill (onboarding + comportamento)
 references/                  # dados editáveis — estenda a skill aqui
-  rules.md                   #   as 9 regras (fonte da verdade)
+  rules.md                   #   as 10 regras (fonte da verdade)
+  brainstorming.md           #   o roteiro da Regra 10: quando alinhar, como perguntar
   stack-catalog.md           #   objetivo → stack
   architecture-catalog.md    #   stack → arquitetura idiomática
   onboarding-flow.md         #   as perguntas
@@ -249,6 +250,7 @@ hooks/                       # os guard-rails técnicos (Python)
   block_migration_edits.py   #   migrações
   enforce_architecture.py    #   arquitetura
   scan_secrets_before_push.py#   segredos
+  require_feature_alignment.py #  alinhamento de feature
 tests/                       # suíte de testes dos hooks (roda no CI a cada PR)
 ```
 

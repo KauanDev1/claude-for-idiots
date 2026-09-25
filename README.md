@@ -220,7 +220,8 @@ hook actually sees on each tool call, and the residual edge cases).
 ```
 SKILL.md                     # the skill's brain (onboarding + behavior)
 references/                  # editable data — extend the skill here
-  rules.md                   #   the 9 rules (source of truth)
+  rules.md                   #   the 10 rules (source of truth)
+  brainstorming.md           #   Rule 10's script: when to align, how to ask
   stack-catalog.md           #   objective → stack
   architecture-catalog.md    #   stack → idiomatic architecture
   onboarding-flow.md         #   the questions
@@ -238,6 +239,7 @@ hooks/                       # the technical guard-rails (Python)
   block_migration_edits.py   #   migrations
   enforce_architecture.py    #   architecture
   scan_secrets_before_push.py#   secrets
+  require_feature_alignment.py #  feature alignment
 tests/                       # hook test suite (runs in CI on every PR)
 ```
 
