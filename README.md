@@ -142,6 +142,9 @@ marked **(checked)** are checked by a hook — a script blocks the common violat
   at random.
 - **Secrets never reach the internet** *(checked)* — keys/passwords stay in a
   local `.env`; anything that publishes is scanned first.
+- **Pauses on a new feature to lay out the hidden decisions first** *(checked)*
+  — presents them as options to pick from before writing any code; a bug fix,
+  a visual tweak, or a rename still go straight through.
 - **Always writes tests** — and asks before running the slow full suite.
 - **Commits after each feature** — so you never lose progress.
 - **Sanity check after each feature** — lint, the feature's tests, and actually
@@ -171,7 +174,7 @@ skill is open.
 
 ## Known limitations
 
-The **(checked)** items above are enforced by three small hook scripts, not
+The **(checked)** items above are enforced by four small hook scripts, not
 a sandbox. They catch the common paths, not every path:
 
 - **Writes made from a shell command aren't inspected the same way.** A file
@@ -196,6 +199,18 @@ a sandbox. They catch the common paths, not every path:
   quietly bypass the Dart architecture. Add the specific path to
   `architecture.allowed_paths` if you hit a false block while writing a
   native plugin.
+- **The feature-alignment check (Rule 10) never sees your prompt, only the
+  file being written.** Telling "new feature" from "bug fix" is Claude's
+  judgment call, not something a script enforces — the hook only catches one
+  narrow, mechanical case: a brand-new code file appearing with no alignment
+  recorded at all. A feature built entirely inside files that already exist,
+  with no new file created, passes through with no pause, no matter how
+  large.
+- **"Is this a test file?" is decided by filename and folder convention**
+  (`tests/`, `test/`, `spec/`, `foo_test.py`, `foo.spec.ts`, …), not by what
+  the file actually does — deliberate, so Rule 10 never fights test-first
+  development. It also means a file that merely *looks* like a test by that
+  convention is exempt the same way a real one is.
 
 See `hooks/README.md`'s "Known gaps" for the lower-level details (what a
 hook actually sees on each tool call, and the residual edge cases).
