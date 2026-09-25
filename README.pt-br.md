@@ -176,6 +176,40 @@ E ela se adapta a **você**:
 automaticamente em toda sessão) mais os hooks, então as regras continuam valendo
 até em sessões longas — não só enquanto a skill está aberta.
 
+## Limitações conhecidas
+
+Os itens marcados **(checado)** acima são reforçados por três scripts-hook
+pequenos, não por uma sandbox. Eles pegam os caminhos mais comuns, não todos:
+
+- **Escrita feita por comando de shell não é inspecionada do mesmo jeito.**
+  Um arquivo escrito via `Edit`/`Write`/`MultiEdit` é checado contra a
+  arquitetura escolhida; o mesmo arquivo criado por um comando de shell (ex.
+  `bash -c "cat > src/random/file.ts"`) não é — só comandos `Bash` que
+  parecem um passo de *publicação* (`git push`, `npm publish`,
+  `docker push`, …) são inspecionados.
+- **A varredura de segredos não alcança um segredo que já está no histórico
+  de um remoto de antes desta skill ser instalada.** Ela checa arquivos
+  rastreados, arquivos `.env` gitignorados em disco, e os commits prestes a
+  ser enviados — não consegue limpar retroativamente algo que já foi
+  enviado num commit anterior.
+- **O enforcement de arquitetura é por extensão de arquivo e por glob de
+  caminho.** Um arquivo sem nenhuma extensão (`Dockerfile`, `Makefile`)
+  nunca é policiado, de propósito — toda extensão de código que ele
+  reconhece (`.ts`, `.py`, `.mjs`, `.astro`, `.sql`, `.sh`, …) é checada a
+  menos que o config do projeto explicitamente a ignore.
+- **Flutter:** arquivos de configuração específicos de plataforma
+  (`AndroidManifest.xml`, `Info.plist`, …) são permitidos por padrão, mas
+  código de plugin nativo em `android/`/`ios/`/`macos/`/`linux/`/`windows/`
+  (um `.kt`/`.swift` novo, `project.pbxproj`) continua sendo checado — de
+  propósito, pra uma camada nativa não conseguir contornar a arquitetura
+  Dart quieta. Adicione o caminho específico em
+  `architecture.allowed_paths` se você tomar um bloqueio indevido
+  escrevendo um plugin nativo.
+
+Veja "Known gaps" em `hooks/README.md` pros detalhes de nível mais baixo (o
+que cada hook realmente vê em cada chamada de ferramenta, e os casos de
+borda residuais).
+
 ## Estrutura do repositório
 
 ```
