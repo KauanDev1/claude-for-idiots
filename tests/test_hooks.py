@@ -623,6 +623,192 @@ class TestScannerHistoryAndEnv(TempProject):
             self.assertEqual(decision(proc), "deny")
 
 
+class TestSecretAllowlist(TempProject):
+    """Task 10: the scanner needs a documented, narrow way out -- today it
+    blocks the hooks project's own repo (tests/test_hooks.py ships
+    AKIAIOSFODNN7EXAMPLE) with no exit at all. A false positive with no
+    escape hatch is how a security hook gets uninstalled instead of obeyed;
+    the escape hatch itself must not become a trivial way to hide a real
+    secret (see test_allowlist_does_not_hide_a_real_secret_elsewhere and
+    friends below).
+    """
+    SCRIPT = "scan_secrets_before_push.py"
+
+    def _repo(self, rel, content):
+        subprocess.run(["git", "-C", self.root, "init", "-q"],
+                       check=True, capture_output=True)
+        target = Path(self.root) / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        subprocess.run(["git", "-C", self.root, "add", "-A"],
+                       check=True, capture_output=True)
+
+    def _add(self, rel, content):
+        target = Path(self.root) / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        subprocess.run(["git", "-C", self.root, "add", "-A"],
+                       check=True, capture_output=True)
+
+    # -- secrets.allowlist_paths: whole-file exemption by path --
+
+    def test_allowlisted_path_is_skipped(self):
+        self._repo("tests/test_hooks.py", 'K = "AKIAIOSFODNN7EXAMPLE"\n')
+        self.write_config({"secrets": {"allowlist_paths": ["tests/**"]}})
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertIsNone(decision(proc))
+
+    def test_allowlist_does_not_hide_a_real_secret_elsewhere(self):
+        self._repo("tests/test_hooks.py", 'K = "AKIAIOSFODNN7EXAMPLE"\n')
+        self._add("app.py", 'K = "AKIAIOSFODNN7EXAMPLE"\n')
+        self.write_config({"secrets": {"allowlist_paths": ["tests/**"]}})
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertEqual(decision(proc), "deny")
+        self.assertIn("app.py", reason(proc))
+
+    def test_allowlist_paths_as_bare_string_still_works(self):
+        # Same tolerance every other *_paths config field already has
+        # (cfi.str_list) -- a single string, not wrapped in a list.
+        self._repo("fixtures/leak.py", 'K = "AKIAIOSFODNN7EXAMPLE"\n')
+        self.write_config({"secrets": {"allowlist_paths": "fixtures/**"}})
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertIsNone(decision(proc))
+
+    def test_allowlisted_path_also_suppresses_the_tracked_dotenv_finding(self):
+        # allowlist_paths exempts the WHOLE file, not just the content
+        # pattern scan -- a fixtures directory legitimately holding a fake
+        # .env (to test env-file detection itself) must not be flagged.
+        self._repo("tests/fixtures/.env", "FAKE=notreallysecretatall\n")
+        self.write_config({"secrets": {"allowlist_paths": ["tests/fixtures/**"]}})
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertIsNone(decision(proc))
+
+    # -- the inline pragma: single-line exemption --
+
+    def test_inline_pragma_exempts_the_line(self):
+        self._repo("fixtures.py",
+                   'K = "AKIAIOSFODNN7EXAMPLE"  # cfi:allow-secret\n')
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertIsNone(decision(proc))
+
+    def test_pragma_exempts_only_its_own_line(self):
+        self._repo("fixtures.py",
+                   'K1 = "AKIAIOSFODNN7EXAMPLE"  # cfi:allow-secret\n'
+                   'K2 = "AKIAIOSFODNN7EXAMPLE"\n')
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertEqual(decision(proc), "deny")
+
+    def test_pragma_also_exempts_the_line_inside_unpushed_history(self):
+        # `git push` sends the full diff of every unpushed commit (see
+        # unpushed_diff) -- a fixture already committed WITH the pragma on
+        # its line must not get flagged just because it now sits one commit
+        # back instead of in the working tree.
+        subprocess.run(["git", "-C", self.root, "init", "-q"],
+                       check=True, capture_output=True)
+        target = Path(self.root) / "fixtures.py"
+        target.write_text('K = "AKIAIOSFODNN7EXAMPLE"  # cfi:allow-secret\n')
+        subprocess.run(["git", "-C", self.root, "add", "-A"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.root, "-c", "user.email=t@t",
+                        "-c", "user.name=t", "commit", "-qm", "add fixture"],
+                       check=True, capture_output=True)
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertIsNone(decision(proc))
+
+    # -- secrets.allow_patterns: content-based exemption from config.json --
+
+    def test_allow_pattern_exempts_the_known_aws_example_key(self):
+        self._repo("fixtures.py", 'K = "AKIAIOSFODNN7EXAMPLE"\n')
+        self.write_config({"secrets": {"allow_patterns": ["AKIAIOSFODNN7EXAMPLE"]}})
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertIsNone(decision(proc))
+
+    def test_allow_pattern_does_not_hide_a_different_secret(self):
+        self._repo("fixtures.py",
+                   'K1 = "AKIAIOSFODNN7EXAMPLE"\n'
+                   'K2 = "AKIAZZZZZZZZZZZZZZZZ"\n')
+        self.write_config({"secrets": {"allow_patterns": ["AKIAIOSFODNN7EXAMPLE"]}})
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertEqual(decision(proc), "deny")
+
+    def test_malformed_allow_pattern_does_not_crash(self):
+        # An invalid regex in config.json (same third-party input class as
+        # protected_paths/allowed_paths) must fail open per-pattern, not
+        # crash the hook -- and must not silently swallow a real secret
+        # elsewhere either.
+        self._repo("app.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        self.write_config({"secrets": {"allow_patterns": ["("]}})
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(decision(proc), "deny")
+
+    # -- type confusion: the allowlist accepts user input straight out of
+    #    config.json, the same class of bug as the RecursionError/TypeError/
+    #    re.error fail-open fixes already landed elsewhere in this project --
+
+    def test_non_dict_or_mistyped_secrets_config_fails_open_without_crashing(self):
+        self._repo("app.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        bad_configs = [
+            "not a dict",
+            123,
+            None,
+            {"allowlist_paths": 42, "allow_patterns": {"a": 1}},
+            {"allowlist_paths": [1, 2, None, "tests/**"],
+             "allow_patterns": [1, None, "ZZZ_NOT_PRESENT_ANYWHERE"]},
+            {"allowlist_paths": [["nested"]], "allow_patterns": [["nested"]]},
+        ]
+        for bad_secrets in bad_configs:
+            self.write_config({"secrets": bad_secrets})
+            proc = run_hook(self.SCRIPT,
+                            self.event("Bash", command="git push origin main"))
+            self.assertEqual(proc.returncode, 0, bad_secrets)
+            self.assertNotIn("Traceback", proc.stderr, bad_secrets)
+            self.assertEqual(decision(proc), "deny", bad_secrets)
+
+    # -- the escape hatch is documented right in the block message --
+
+    def test_block_message_documents_the_escape_hatch(self):
+        self._repo("app.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        self.assertEqual(decision(proc), "deny")
+        text = reason(proc)
+        self.assertIn("allowlist_paths", text)
+        self.assertIn("cfi:allow-secret", text)
+
+    # -- a pathological allow_patterns entry must not stall the hook --
+
+    def test_pathological_allow_pattern_does_not_stall_the_hook(self):
+        # secrets.allow_patterns is compiled straight from config.json, the
+        # same third-party/attacker-adjacent input class _cfi_common.py
+        # already treats protected_paths/allowed_paths as. A classic
+        # catastrophic-backtracking construction must not push ONE tracked
+        # file's scan anywhere near the hook's wall-clock budget, and must
+        # not let it go quiet about a genuinely different secret elsewhere
+        # in the same repo while it's busy.
+        self._repo("evil.txt", "a" * 30 + "!\n")
+        self._add("leak.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        self.write_config({"secrets": {"allow_patterns": ["(a+)+$"]}})
+        start = time.monotonic()
+        proc = run_hook(self.SCRIPT,
+                        self.event("Bash", command="git push origin main"))
+        elapsed = time.monotonic() - start
+        self.assertEqual(proc.returncode, 0)
+        self.assertLess(elapsed, 20.0, f"took {elapsed:.2f}s")
+        self.assertEqual(decision(proc), "deny")
+
+
 class TestPublishDetection(TempProject):
     """Rule 6 must recognize the whole publish surface, not just `git push` and
     a couple of `gh` subcommands -- an audit found eleven of twelve real

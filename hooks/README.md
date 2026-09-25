@@ -39,3 +39,29 @@ During onboarding the skill:
 `scan_secrets_before_push.py` has a `SECRET_PATTERNS` list — add regexes there.
 The architecture and migration hooks are fully driven by `config.json`, so most
 tuning is done in config, not code.
+
+## The secrets scanner's escape hatch
+
+A false positive with no way out is how a security hook gets uninstalled
+instead of obeyed — so `scan_secrets_before_push.py` reads an optional
+`secrets` section of `config.json`:
+
+```json
+"secrets": {
+  "allowlist_paths": ["tests/fixtures/**"],
+  "allow_patterns": ["AKIAIOSFODNN7EXAMPLE"]
+}
+```
+
+- `allowlist_paths` exempts a whole tracked file by path (same glob syntax
+  as `migrations.protected_paths` / `architecture.allowed_paths`).
+- `allow_patterns` exempts any line matching one of these regexes, wherever
+  it appears (a tracked file or the unpushed-history diff).
+- `# cfi:allow-secret` on a line exempts just that line, no config needed —
+  put it next to a fixture or a documented example.
+
+Both mechanisms are deliberately narrow: they exempt a specific path or a
+specific line, never a whole command or repo, so they can't quietly cancel
+out Rule 6. **Never use them for a live credential** — only for test
+fixtures and documented examples that were never a real secret to begin
+with.

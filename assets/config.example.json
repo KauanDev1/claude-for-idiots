@@ -31,6 +31,10 @@
       "**/migrations/*.sql"
     ]
   },
+  "secrets": {
+    "allowlist_paths": ["tests/fixtures/**"],
+    "allow_patterns": ["AKIAIOSFODNN7EXAMPLE"]
+  },
   "tests": {
     "enabled": true,
     "unit": true,
