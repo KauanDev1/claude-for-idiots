@@ -482,9 +482,25 @@ def blank_quoted(command, _depth=0):
             inner = command[content_start:close]
             terminated = close < n
 
-            if _is_exec_arg(command, i) and _depth < MAX_QUOTE_RECURSION:
-                recurse_src = _unescape_dquote(inner) if quote == '"' else inner
-                scanned = blank_quoted(recurse_src, _depth + 1)
+            if _is_exec_arg(command, i):
+                if _depth < MAX_QUOTE_RECURSION:
+                    recurse_src = _unescape_dquote(inner) if quote == '"' else inner
+                    scanned = blank_quoted(recurse_src, _depth + 1)
+                else:
+                    # Recursion budget exhausted, but this quote is STILL
+                    # a command being executed (_is_exec_arg said so) --
+                    # unlike the plain "blank by default" case below, the
+                    # fail-open-safe direction here is to leave it raw for
+                    # the caller's flat regex scan to see, not to blank it.
+                    # Blanking would suppress a genuine publish command
+                    # past whatever nesting depth an attacker chose to
+                    # exhaust the budget with -- recreating CRITICAL 1 at
+                    # the depth cap's edge instead of closing it. Message
+                    # flags nested this deep inside a wrapper (vanishingly
+                    # unlikely in practice) stay unblanked too, at worst
+                    # trading a false positive for never fabricating a
+                    # false negative.
+                    scanned = inner
             else:
                 scanned = " " * len(inner)
 

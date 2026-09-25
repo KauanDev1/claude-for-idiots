@@ -815,6 +815,66 @@ class TestExecWrapperCannotHideAPublish(TempProject):
         self.assertIsNone(decision(proc))
 
 
+class TestQuoteRecursionCapFailsRawNotBlank(unittest.TestCase):
+    """White-box coverage for blank_quoted's recursion-depth cap
+    (MAX_QUOTE_RECURSION), which the public command-line interface cannot
+    exercise at all: real double-quote escaping through N nested shells
+    grows the command length exponentially in N (each layer roughly
+    doubles every backslash needed to survive one more parse), so a chain
+    deep enough to exceed MAX_QUOTE_RECURSION (20 levels) already exceeds
+    MAX_COMMAND_CHARS (2,000,000) and gets truncated well before recursion
+    depth becomes the limiting factor -- the two caps defend each other's
+    edge in practice. Tested directly against blank_quoted's internal
+    `_depth` parameter instead, as insurance: past the cap, exec content
+    must be left RAW for the caller's flat scan, never blanked -- blanking
+    it would silently suppress a genuine publish command at exactly the
+    depth an attacker chose to exhaust the budget, recreating CRITICAL 1
+    at the cap's edge. This is the one place in this suite that imports
+    the hook module directly rather than going through run_hook, because
+    the property being tested is unreachable from the subprocess/event
+    interface by construction.
+    """
+
+    def _blank_quoted_at_depth(self, command, depth):
+        harness = f"""
+import sys, json
+sys.path.insert(0, {str(HOOKS_DIR)!r})
+import scan_secrets_before_push as m
+data = json.loads(sys.stdin.read())
+print(json.dumps(m.blank_quoted(data["command"], _depth=data["depth"])))
+"""
+        proc = subprocess.run(
+            [sys.executable, "-c", harness],
+            input=json.dumps({"command": command, "depth": depth}),
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def _max_quote_recursion(self):
+        harness = f"""
+import sys, json
+sys.path.insert(0, {str(HOOKS_DIR)!r})
+import scan_secrets_before_push as m
+print(json.dumps(m.MAX_QUOTE_RECURSION))
+"""
+        proc = subprocess.run([sys.executable, "-c", harness],
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_one_level_below_the_cap_still_recurses_and_blanks_a_nested_message(self):
+        cap = self._max_quote_recursion()
+        out = self._blank_quoted_at_depth(
+            """bash -c "git commit -m 'mentions npm publish'\"""", cap - 1)
+        self.assertNotIn("publish", out)
+
+    def test_at_the_cap_the_command_is_left_raw_not_blanked(self):
+        cap = self._max_quote_recursion()
+        out = self._blank_quoted_at_depth('bash -c "git push origin main"', cap)
+        self.assertIn("git push origin main", out)
+
+
 class TestPublishRegexTimeBudget(unittest.TestCase):
     """Task-9b review, CRITICAL 2 (plus the coordinator's addendum): two
     independent constructs in this file cost O(n^2) when their trigger word
