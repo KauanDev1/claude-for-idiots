@@ -203,6 +203,28 @@ class TestRepoConsistency(unittest.TestCase):
                         "settings aponta para hooks inexistentes: "
                         + str(referenced - shipped))
 
+    # -- 3. every shipped hook must be wired into settings.template.json ----
+    #
+    # The check above catches "settings points at a hook that doesn't
+    # exist." It does not catch the opposite and more likely mistake: a
+    # hook lands under hooks/ and nobody adds it to settings.template.json,
+    # so it ships in the skill but never actually runs for a user who
+    # follows the template. Same discovery mechanism as the fail-open sweep
+    # (_discover_hook_scripts, glob over hooks/*.py excluding the shared
+    # _cfi_common.py module) so a hook added later is covered here too,
+    # without hand-listing hook names in two places.
+    def test_settings_template_registers_every_shipped_hook(self):
+        settings = json.loads(
+            (ROOT / "assets" / "settings.template.json").read_text())
+        referenced = set(re.findall(r"hooks/(\w+\.py)", json.dumps(settings)))
+        shipped = {p.name for p in _discover_hook_scripts()}
+        unregistered = shipped - referenced
+        self.assertFalse(
+            unregistered,
+            "hook(s) shipped under hooks/ but never wired into "
+            "assets/settings.template.json -- a user who follows the "
+            "template will never run them: " + str(unregistered))
+
     # -- 1. catalog x STACKS table -----------------------------------------
     def test_architecture_catalog_matches_real_projects_stacks_table(self):
         sys.path.insert(0, str(ROOT / "tests"))
@@ -238,6 +260,41 @@ class TestRepoConsistency(unittest.TestCase):
             "matches tests/test_real_projects.py's STACKS table -- update "
             "both together (and re-run tests/test_real_projects.py against "
             "the fixture tree):\n" + "\n".join(mismatches))
+
+    # -- 1b. rules.md x CLAUDE.template.md's numbered rule list -------------
+    #
+    # Same defect class as the catalog/STACKS check above: references/
+    # rules.md's `## Rule N` headings (the source, prose + reasoning) and
+    # assets/CLAUDE.template.md's numbered "## Rules (always apply)" list
+    # (what actually ships into a user's CLAUDE.md) are two hand-maintained
+    # copies of the same rule set. Nothing stops one from gaining/losing a
+    # rule -- e.g. a new Rule 11 documented in rules.md but never added to
+    # the template a user actually receives -- while every other test stays
+    # green.
+    def test_rules_doc_matches_claude_template_numbered_list(self):
+        rules_text = (ROOT / "references" / "rules.md").read_text(encoding="utf-8")
+        rule_numbers = set(re.findall(r"(?m)^## Rule (\d+)\b", rules_text))
+        self.assertTrue(
+            rule_numbers,
+            "no '## Rule N' headings found in references/rules.md -- "
+            "heading format changed, update the regex above")
+
+        template_text = (ROOT / "assets" / "CLAUDE.template.md").read_text(
+            encoding="utf-8")
+        template_numbers = set(re.findall(r"(?m)^(\d+)\.\s+\*\*", template_text))
+        self.assertTrue(
+            template_numbers,
+            "no numbered rule items found in assets/CLAUDE.template.md -- "
+            "list format changed, update the regex above")
+
+        self.assertEqual(
+            rule_numbers, template_numbers,
+            "references/rules.md's '## Rule N' headings and "
+            "assets/CLAUDE.template.md's numbered rule list have drifted "
+            "apart -- add/renumber the rule on both sides together:\n"
+            f"only in rules.md: {sorted(rule_numbers - template_numbers, key=int)}\n"
+            f"only in CLAUDE.template.md: "
+            f"{sorted(template_numbers - rule_numbers, key=int)}")
 
     # -- 2. embedded shell commands must actually parse ---------------------
     def test_config_example_shell_commands_are_syntactically_valid(self):
