@@ -83,8 +83,9 @@ architecture, update this section AND `.claude-for-idiots/config.json` first.
     fires:      "quero login com Google" · "adiciona carrinho" · "exportar em PDF"
     does not:   "arruma esse erro do console" · "muda a cor do botão" · "renomeia calcTotal"
     ```
-    Recorded in `.claude-for-idiots/current-feature.json` before code is
-    touched; full script: claude-for-idiots's `references/brainstorming.md`.
+    Write the agreed decisions to `.claude-for-idiots/current-feature.json`
+    before touching code — the hook reads that file. If I say to go straight
+    ahead, record that and do it; don't ask twice.
 
 ## Commands
 - Relevant tests (per feature): `{{FEATURE_TEST_CMD}}`
