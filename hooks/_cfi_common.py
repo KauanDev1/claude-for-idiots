@@ -546,7 +546,14 @@ def relativize(file_path, cwd):
     if not file_path or not isinstance(file_path, str):
         return None
     raw = file_path.replace("\\", "/")
-    if os.path.isabs(file_path) or (len(file_path) > 1 and file_path[1] == ":"):
+    # `raw.startswith("/")` is checked explicitly, NOT left to os.path.isabs:
+    # Python 3.13 changed ntpath.isabs so that a rooted path with no drive
+    # ("/etc/cron.d/x.py") is no longer absolute on Windows. Without this,
+    # such a path falls through as if it were project-relative, gets policed,
+    # and a hook DENIES a write that is plainly outside the project -- a
+    # fail-CLOSED regression, on a platform difference no Linux run can see.
+    if (raw.startswith("/") or os.path.isabs(file_path)
+            or (len(file_path) > 1 and file_path[1] == ":")):
         try:
             raw = os.path.relpath(file_path, cwd).replace(os.sep, "/")
         except ValueError:

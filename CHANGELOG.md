@@ -11,6 +11,15 @@ yet, instead of guessing at the decisions hidden inside your request.
 
 ### Added
 
+- **A write plainly outside the project could be DENIED on Windows with
+  Python 3.13+.** `relativize` asked `os.path.isabs` alone to tell an outside
+  path from a project-relative one, and 3.13 changed `ntpath.isabs` so a rooted
+  path with no drive letter (`/etc/cron.d/x.py`) is no longer absolute there.
+  It fell through as project-relative, got policed, and the hook blocked it —
+  fail-closed, the one direction these hooks must never take. Found by the CI
+  matrix: windows/3.13 red while windows/3.9 and every Linux and macOS job
+  stayed green.
+
 - **`secrets.allow_patterns` now degrades to nothing on Windows instead of
   risking a stalled hook.** The field is a regex straight out of `config.json`;
   a catastrophic-backtracking entry (`(a+)+$` against a 31-character line was

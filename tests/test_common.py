@@ -443,5 +443,29 @@ class TestIsPoliced(unittest.TestCase):
         self.assertTrue(c.is_policed("x.ts", []))
 
 
+
+class TestRelativizeRootedPathWithoutDrive(unittest.TestCase):
+    """A rooted path with no drive letter is outside the project, on every
+    platform and every Python.
+
+    Python 3.13 changed `ntpath.isabs` so "/etc/cron.d/x.py" is no longer
+    absolute on Windows. `relativize` used to ask `os.path.isabs` alone, so
+    on that one combination the path fell through as if it were
+    project-relative: the hooks policed it and DENIED a write plainly
+    outside the project -- fail-closed, the one direction this project
+    treats as inviolable. Caught by the CI matrix (windows/3.13 red,
+    windows/3.9 green); no Linux run can reproduce it, because posixpath
+    has always called this absolute.
+    """
+
+    def test_rooted_path_without_drive_is_outside_the_project(self):
+        for raw in ("/etc/cron.d/x.py", "/tmp/z.py", "//server/share/x.py",
+                    "\\\\etc\\\\cron.d\\\\x.py"):
+            self.assertIsNone(c.relativize(raw, "/proj"), raw)
+
+    def test_a_normal_relative_path_still_resolves(self):
+        self.assertEqual(c.relativize("src/ok.py", "/proj"), "src/ok.py")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
