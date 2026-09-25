@@ -298,8 +298,20 @@ class TestRepoConsistency(unittest.TestCase):
 
     # -- 2. embedded shell commands must actually parse ---------------------
     def test_config_example_shell_commands_are_syntactically_valid(self):
+        # `shutil.which` is not enough: on the GitHub windows runner `bash`
+        # IS on PATH but resolves to a stub that exits 1 with no stderr, so
+        # every command would "fail" syntax checking and say nothing about
+        # the commands under test. Probe with a known-good one and skip when
+        # the checker itself is unusable.
         if shutil.which("bash") is None:
             self.skipTest("bash not found on PATH")
+        try:
+            probe = subprocess.run(["bash", "-n", "-c", "echo ok"],
+                                   capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("bash cannot be executed here")
+        if probe.returncode != 0:
+            self.skipTest("bash -n cannot validate syntax in this environment")
 
         config = json.loads((ROOT / "assets" / "config.example.json").read_text())
         failures = []
