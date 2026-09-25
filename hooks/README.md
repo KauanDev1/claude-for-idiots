@@ -71,6 +71,17 @@ with.
 
 ## Known gaps
 
+- **`secrets.allow_patterns` does not run on Windows.** The field is
+  evaluated only where `signal.SIGALRM` exists (Linux, macOS). A regex from
+  `config.json` can backtrack catastrophically -- measured: `(a+)+$` against
+  a 31-character line ran 96s under a 5s budget -- and there is no way to
+  interrupt a `re.search` already in flight without SIGALRM (a watchdog
+  thread never gets scheduled, because `re.search` holds the GIL for its
+  whole run). Rather than ship a hook that can blow its 60s ceiling on a
+  typo, the field degrades to nothing there and the block message says so.
+  `secrets.allowlist_paths` and the `# cfi:allow-secret` pragma work on
+  every platform -- both are plain string and path work.
+
 These four hooks catch the common paths, not every path. Higher-level,
 beginner-facing gaps are in the main READMEs' "Known limitations" — these
 are the lower-level ones, for anyone extending or auditing the hooks:

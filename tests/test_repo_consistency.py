@@ -405,7 +405,7 @@ class TestRepoConsistency(unittest.TestCase):
         )
         self.assertEqual(
             missing, [],
-            "SKILL.md points at repo files that do not exist: {}".format(missing))
+            f"SKILL.md points at repo files that do not exist: {missing}")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -251,6 +251,11 @@ Being upfront beats being surprised:
   `foo_test.py`, `foo.spec.ts`, …), not by what the file does — deliberate, so
   Rule 10 never fights test-first development. A file that merely *looks* like a
   test is exempt the same way.
+- **`secrets.allow_patterns` is Linux/macOS only.** A regex from the config can
+  backtrack catastrophically and there is no way to interrupt one mid-run on
+  Windows, so the field degrades to nothing there rather than risk stalling the
+  hook; the block message says so. `secrets.allowlist_paths` and the
+  `# cfi:allow-secret` pragma work everywhere.
 - **Existing codebases and deploy workflows aren't covered yet.**
 
 Hit one of these? [Open an issue](https://github.com/JulioBarbosaS/Claude-For-Idiots/issues) —

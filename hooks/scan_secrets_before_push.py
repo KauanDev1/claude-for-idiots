@@ -271,9 +271,11 @@ def _match_within_budget(pattern, line, deadline):
     if remaining <= 0:
         return None
     if not _HAS_SIGALRM:
-        # Best effort only where the platform gives no way to interrupt a
-        # call already in progress -- see ALLOW_PATTERN_TIME_BUDGET above.
-        return pattern.search(line)
+        # Unreachable: _compile_allow_patterns refuses to compile anything on
+        # a platform with no way to interrupt a match already in flight, so
+        # there is never a pattern to run here. Kept as a hard stop in case a
+        # future caller compiles patterns some other way.
+        return None
     old_handler = signal.signal(signal.SIGALRM, _raise_allow_pattern_timeout)
     try:
         signal.setitimer(signal.ITIMER_REAL, remaining)
@@ -291,6 +293,19 @@ def _compile_allow_patterns(raw_patterns):
     anything too long or not a valid regex -- fail open per-pattern, same
     direction as _cfi_common._compile_class: a malformed or hostile entry
     in config.json must never crash the hook, it just exempts nothing."""
+    if not _HAS_SIGALRM:
+        # No SIGALRM, no allow_patterns. Measured on this platform's
+        # behalf before this guard existed: the classic `(a+)+$` against a
+        # 31-CHARACTER line ran 96s under a 5s budget. Neither cap helps --
+        # MAX_ALLOW_PATTERN_LINE_CHARS bounds the input, not the
+        # backtracking, and a thread cannot be used to bound it either
+        # because `re.search` holds the GIL for its whole run, so the
+        # watchdog never gets scheduled. Rather than ship a hook that can
+        # blow its 60s ceiling on a typo, this one field degrades: Windows
+        # keeps `secrets.allowlist_paths` and the `# cfi:allow-secret`
+        # pragma, which are plain string and path work with no backtracking
+        # to run away with. Announced in the block message, never silent.
+        return []
     compiled = []
     for raw in raw_patterns:
         if len(raw) > MAX_ALLOW_PATTERN_CHARS:
@@ -710,8 +725,11 @@ def main():
     # repo regardless of invocation cwd).
     secrets_cfg = cfi.section(cfi.load_config(root) or {}, "secrets")
     allowed_paths = cfi.str_list(secrets_cfg.get("allowlist_paths"))
-    allow_patterns = _compile_allow_patterns(
-        cfi.str_list(secrets_cfg.get("allow_patterns")))
+    raw_allow_patterns = cfi.str_list(secrets_cfg.get("allow_patterns"))
+    allow_patterns = _compile_allow_patterns(raw_allow_patterns)
+    # Configured but dropped for lack of SIGALRM -- say so rather than let
+    # the user wonder why their exemption stopped working.
+    patterns_unavailable = bool(raw_allow_patterns) and not _HAS_SIGALRM
     allow_pattern_deadline = time.monotonic() + ALLOW_PATTERN_TIME_BUDGET
 
     for rel in tracked_files(root):
@@ -770,7 +788,12 @@ def main():
             "path to secrets.allowlist_paths in "
             ".claude-for-idiots/config.json, or put # cfi:allow-secret on "
             "the line. Never do this for a live credential.\n"
-            "Warn the user clearly in their language."
+            + ("NOTE: secrets.allow_patterns is not evaluated on this "
+               "platform (no signal.SIGALRM, so a runaway pattern could not "
+               "be interrupted). Use secrets.allowlist_paths or the "
+               "# cfi:allow-secret pragma instead.\n"
+               if patterns_unavailable else "")
+            + "Warn the user clearly in their language."
         ))
 
     cfi.allow()

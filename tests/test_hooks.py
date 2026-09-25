@@ -44,6 +44,22 @@ BRAINSTORM_CONFIG_OFF = {"brainstorm": {"enforce": "off"}}
 BRAINSTORM_CONFIG_DEFAULT = {"brainstorm": {}}
 
 
+
+def bash_can_check_syntax():
+    """True when `bash -n` on THIS machine can validate a trivially valid
+    command. On the GitHub windows runner `bash` resolves to a stub that
+    exits 1 with no stderr, so a failing `bash -n` there says nothing about
+    the command under test -- it says the checker is unusable. Probe with a
+    known-good command first and skip rather than report a false failure.
+    """
+    try:
+        probe = subprocess.run(["bash", "-n", "-c", "echo ok"],
+                               capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
 def run_hook(script, event, env=None):
     return subprocess.run(
         [sys.executable, str(HOOKS_DIR / script)],
@@ -1196,6 +1212,8 @@ class TestMigrationPatterns(TempProject):
         reason_text = json.loads(proc.stdout)["hookSpecificOutput"][
             "permissionDecisionReason"]
         command = reason_text.split("run: ")[1].split("\n")[0]
+        if not bash_can_check_syntax():
+            self.skipTest("bash -n cannot validate syntax in this environment")
         check = subprocess.run(["bash", "-n", "-c", command],
                                capture_output=True, text=True)
         self.assertEqual(check.returncode, 0, check.stderr)
@@ -1259,6 +1277,8 @@ class TestShippedConfigExampleMigrations(unittest.TestCase):
         reason_text = json.loads(proc.stdout)["hookSpecificOutput"][
             "permissionDecisionReason"]
         command = reason_text.split("run: ")[1].split("\n")[0]
+        if not bash_can_check_syntax():
+            self.skipTest("bash -n cannot validate syntax in this environment")
         check = subprocess.run(["bash", "-n", "-c", command],
                                capture_output=True, text=True)
         self.assertEqual(check.returncode, 0, check.stderr)

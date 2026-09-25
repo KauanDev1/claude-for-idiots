@@ -255,6 +255,11 @@ Ser transparente é melhor do que te pegar de surpresa:
   `foo_test.py`, `foo.spec.ts`, …), não pelo que o arquivo faz — deliberado, pra
   Regra 10 nunca brigar com teste-primeiro. Um arquivo que só *parece* teste é
   isento do mesmo jeito.
+- **`secrets.allow_patterns` só roda em Linux/macOS.** Uma regex vinda do config
+  pode entrar em backtracking catastrófico e no Windows não há como interromper
+  uma que já começou, então o campo simplesmente não vale lá em vez de arriscar
+  travar o hook — a mensagem de bloqueio avisa. `secrets.allowlist_paths` e o
+  pragma `# cfi:allow-secret` funcionam em qualquer plataforma.
 - **Bases de código já existentes e fluxos de deploy ainda não são cobertos.**
 
 Esbarrou em alguma? [Abra uma issue](https://github.com/JulioBarbosaS/Claude-For-Idiots/issues) —

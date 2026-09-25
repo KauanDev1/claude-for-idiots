@@ -10,6 +10,16 @@ A new rule: Claude now pauses before building a feature you haven't described
 yet, instead of guessing at the decisions hidden inside your request.
 
 ### Added
+
+- **`secrets.allow_patterns` now degrades to nothing on Windows instead of
+  risking a stalled hook.** The field is a regex straight out of `config.json`;
+  a catastrophic-backtracking entry (`(a+)+$` against a 31-character line was
+  measured at 96s under a 5s budget) cannot be interrupted without
+  `signal.SIGALRM`, which Windows does not have — and a watchdog thread does
+  not help, because `re.search` holds the GIL for its whole run. Where it
+  cannot be bounded it is not evaluated, and the block message says so.
+  `secrets.allowlist_paths` and the `# cfi:allow-secret` pragma are unaffected
+  on every platform.
 - **Rule 10 — align before building a feature.** A request that would add
   behavior the project doesn't have yet (a login method, a new export format,
   a new panel) now stops before any code gets written: Claude searches the
