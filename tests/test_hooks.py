@@ -36,6 +36,13 @@ ARCH_CONFIG = {
     }
 }
 
+BRAINSTORM_CONFIG_ASK = {"brainstorm": {"enforce": "ask"}}
+BRAINSTORM_CONFIG_DENY = {"brainstorm": {"enforce": "deny"}}
+BRAINSTORM_CONFIG_OFF = {"brainstorm": {"enforce": "off"}}
+# enforce omitted entirely -- exercises the "section present, key absent ->
+# ask" default from the plan's enforce convention table.
+BRAINSTORM_CONFIG_DEFAULT = {"brainstorm": {}}
+
 
 def run_hook(script, event, env=None):
     return subprocess.run(
@@ -74,6 +81,25 @@ class TempProject(unittest.TestCase):
 
     def event(self, tool, **tool_input):
         return {"cwd": self.root, "tool_name": tool, "tool_input": tool_input}
+
+    def write_record(self, record, rel=".claude-for-idiots/current-feature.json"):
+        path = Path(self.root) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(record if isinstance(record, str) else json.dumps(record))
+
+    def git_init_with_commit(self):
+        """Real git repo with one empty commit; returns its short HEAD, the
+        same form require_feature_alignment.py computes via `git rev-parse
+        --short HEAD`, so tests can write a record that matches (or, by
+        construction, a record that doesn't)."""
+        subprocess.run(["git", "-C", self.root, "init", "-q"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.root, "-c", "user.email=t@t",
+                        "-c", "user.name=t", "commit", "--allow-empty",
+                        "-qm", "init"], check=True, capture_output=True)
+        out = subprocess.run(["git", "-C", self.root, "rev-parse", "--short", "HEAD"],
+                             check=True, capture_output=True, text=True)
+        return out.stdout.strip()
 
 
 class TestBlockMigrationEdits(TempProject):
@@ -1438,6 +1464,370 @@ runpy.run_path({str(HOOKS_DIR / script)!r}, run_name="__main__")
             self.event("Bash", command="git push origin main"))
         self.assertEqual(proc.returncode, 0)
         self.assertNotIn("Traceback", proc.stderr)
+
+    def test_require_feature_alignment_survives_a_failure_reading_the_event(self):
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        proc = self._run_with_forced_exception(
+            "require_feature_alignment.py", "cfi.read_event",
+            self.event("Write", file_path=os.path.join(self.root, "src/new_thing.py")))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_require_feature_alignment_survives_a_failure_loading_config(self):
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        proc = self._run_with_forced_exception(
+            "require_feature_alignment.py", "cfi.load_config",
+            self.event("Write", file_path=os.path.join(self.root, "src/new_thing.py")))
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+
+class TestRequireFeatureAlignment(TempProject):
+    """Rule 10's hook -- the net, not the judge (see the module docstring
+    in hooks/require_feature_alignment.py). Every ALLOW/ASK/DENY row in the
+    plan's Task 5 Step 1 case table has a test here; the enforce-value
+    table is the CORRECTED one from the plan's Review Focus #8 (an invalid
+    enforce value fails open to "off", not "ask" -- an earlier draft of the
+    plan said the opposite and was wrong, measured against Rule 5's actual
+    code).
+    """
+    SCRIPT = "require_feature_alignment.py"
+
+    def _new_code_event(self, name="src/auth/new_feature.py"):
+        return self.event("Write", file_path=os.path.join(self.root, name))
+
+    # ---- section / enforce-value plumbing -------------------------------
+
+    def test_allows_without_config(self):
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertIsNone(decision(proc))
+
+    def test_allows_when_brainstorm_section_is_absent(self):
+        # Compatibility with a 0.4.0 project: no `brainstorm` key at all
+        # must never produce a new prompt out of nowhere.
+        self.write_config({"architecture": {"name": "x"}})
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertIsNone(decision(proc))
+
+    def test_allows_when_brainstorm_section_has_the_wrong_type(self):
+        for bad_section in ["ask", ["ask"], 1, True, None]:
+            self.write_config({"brainstorm": bad_section})
+            proc = run_hook(self.SCRIPT, self._new_code_event())
+            self.assertIsNone(decision(proc), repr(bad_section))
+
+    def test_asks_by_default_when_section_present_but_enforce_is_absent(self):
+        self.write_config(BRAINSTORM_CONFIG_DEFAULT)
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertEqual(decision(proc), "ask")
+
+    def test_allows_when_enforce_is_off(self):
+        self.write_config(BRAINSTORM_CONFIG_OFF)
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertIsNone(decision(proc))
+
+    def test_allows_when_enforce_value_is_invalid(self):
+        # Corrected per the plan's Review Focus #8: an unrecognized value
+        # fails open to "off" (allow), the same direction as Rule 5's own
+        # `mode not in ("deny", "ask") -> allow` -- NOT "ask". "ask" is a
+        # decision, not silence, so unexpected config must not land there.
+        for bad_mode in ["DENY", "Ask", True, False, None, 42, [], {}]:
+            self.write_config({"brainstorm": {"enforce": bad_mode}})
+            proc = run_hook(self.SCRIPT, self._new_code_event())
+            self.assertIsNone(decision(proc), repr(bad_mode))
+
+    # ---- allow: edit, not placement --------------------------------------
+
+    def test_allows_editing_an_existing_file(self):
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        target = Path(self.root) / "src" / "auth" / "existing.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("x = 1\n")
+        proc = run_hook(self.SCRIPT, self.event("Write", file_path=str(target)))
+        self.assertIsNone(decision(proc))
+
+    # ---- allow: not code ---------------------------------------------------
+
+    def test_allows_new_non_code_files(self):
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        for name in ["README.md", ".env.example", "docs/notes.md",
+                     "Dockerfile", "package.json", "logo.svg"]:
+            proc = run_hook(self.SCRIPT, self._new_code_event(name))
+            self.assertIsNone(decision(proc), name)
+
+    # ---- allow: test file (Rule 2 must never fight Rule 10) ---------------
+
+    def test_allows_new_test_files_across_stack_conventions(self):
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        names = [
+            "tests/test_login.py",
+            "tests/unit/test_login.py",
+            "test/widget_test.dart",
+            "integration_test/app_test.dart",
+            "test_driver/integration_test.dart",
+            "e2e/login.spec.ts",
+            "test/app.e2e-spec.ts",
+            "src/auth/login.test.tsx",
+            "src/auth/login.spec.ts",
+            "src/auth/login_test.go",
+            "spec/login_spec.rb",
+        ]
+        for name in names:
+            proc = run_hook(self.SCRIPT, self._new_code_event(name))
+            self.assertIsNone(decision(proc), name)
+
+    def test_does_not_treat_ordinary_files_ending_in_test_as_tests(self):
+        # Property, not example: "test"/"spec" must be a whole, separator-
+        # bounded token, or ordinary words like "latest"/"contest"/"attest"
+        # would be silently exempted from Rule 10 by accident.
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        for name in ["src/latest.py", "src/contest.py", "src/attest.py",
+                     "src/protest.py", "src/testing_utils.py"]:
+            proc = run_hook(self.SCRIPT, self._new_code_event(name))
+            self.assertEqual(decision(proc), "deny", name)
+
+    # ---- allow: fresh / skipped record -------------------------------------
+
+    def test_allows_new_code_when_record_head_matches_current_head(self):
+        head = self.git_init_with_commit()
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        self.write_record({"slug": "x", "head": head, "decisions": ["a"],
+                           "skipped": False})
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertIsNone(decision(proc))
+
+    def test_allows_new_code_when_skipped_record_head_matches_current_head(self):
+        head = self.git_init_with_commit()
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        self.write_record({"slug": "x", "head": head, "skipped": True})
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertIsNone(decision(proc))
+
+    # ---- ask / deny: stale or absent record --------------------------------
+
+    def test_asks_new_code_with_no_record_and_enforce_ask(self):
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertEqual(decision(proc), "ask")
+
+    def test_denies_new_code_with_no_record_and_enforce_deny(self):
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertEqual(decision(proc), "deny")
+
+    def test_asks_when_record_head_is_stale(self):
+        self.git_init_with_commit()
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        # A record written for a HEAD that is no longer current -- e.g. a
+        # prior feature's alignment, left over after Rule 3 committed it.
+        self.write_record({"slug": "old", "head": "0000000",
+                           "decisions": ["a"], "skipped": False})
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertEqual(decision(proc), "ask")
+
+    def test_denies_when_skipped_record_head_is_stale(self):
+        # Riscos conhecidos: a skipped record is only fresh for the HEAD it
+        # was written at -- it does not pre-authorize the next feature.
+        self.git_init_with_commit()
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        self.write_record({"slug": "old", "head": "0000000", "skipped": True})
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertEqual(decision(proc), "deny")
+
+    # ---- allow: no git / vcs none -------------------------------------------
+
+    def test_allows_when_project_has_no_git_and_a_record_is_present(self):
+        # No git repo at all -- current HEAD can't be determined, so
+        # staleness can never be proven. Fail open: a present record still
+        # counts, same reasoning as Riscos conhecidos ("`head` some em
+        # projeto sem git").
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        self.write_record({"slug": "x", "head": "abc1234",
+                           "decisions": ["a"], "skipped": False})
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertIsNone(decision(proc))
+
+    def test_asks_when_project_has_no_git_and_no_record_at_all(self):
+        # No git is not a free pass on its own -- it only rescues a record
+        # that is already present. With no record either, the normal
+        # enforce decision still applies.
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertEqual(decision(proc), "ask")
+
+    # ---- allow: malformed record --------------------------------------------
+
+    def test_allows_malformed_record_regardless_of_enforce_mode(self):
+        malformed_bodies = ["{}", "[]", '"just a string"', "{not json",
+                           "[" * 5000 + "]" * 5000, "null", "42"]
+        for cfg in (BRAINSTORM_CONFIG_ASK, BRAINSTORM_CONFIG_DENY):
+            self.write_config(cfg)
+            for body in malformed_bodies:
+                self.write_record(body)
+                proc = run_hook(self.SCRIPT, self._new_code_event())
+                self.assertIsNone(decision(proc), f"{cfg} / {body[:30]!r}")
+
+    def test_allows_record_with_head_present_but_not_a_string(self):
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        for bad_head in [None, 123, ["abc1234"], {}]:
+            self.write_record({"slug": "x", "head": bad_head, "decisions": []})
+            proc = run_hook(self.SCRIPT, self._new_code_event())
+            self.assertIsNone(decision(proc), repr(bad_head))
+
+    # ---- non-ASCII paths get the same decision as ASCII ones --------------
+
+    def test_non_ascii_path_gets_the_same_decision_as_the_ascii_equivalent(self):
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        ascii_proc = run_hook(self.SCRIPT, self._new_code_event("src/config.py"))
+        nonascii_proc = run_hook(self.SCRIPT, self._new_code_event("src/configuração.py"))
+        self.assertEqual(decision(ascii_proc), decision(nonascii_proc))
+        self.assertEqual(decision(nonascii_proc), "ask")
+
+    def test_non_ascii_path_inside_architecture_style_allowed_dir_still_asks(self):
+        # Non-ASCII must not accidentally short-circuit into any other
+        # branch (e.g. being treated as "outside the project" and allowed).
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        proc = run_hook(self.SCRIPT, self._new_code_event("src/são-paulo/novo.py"))
+        self.assertEqual(decision(proc), "deny")
+
+    # ---- custom record path is honored -------------------------------------
+
+    def test_custom_record_path_from_config_is_read(self):
+        head = self.git_init_with_commit()
+        self.write_config({"brainstorm": {"enforce": "deny",
+                                          "record": "notes/feature.json"}})
+        self.write_record({"slug": "x", "head": head, "decisions": ["a"]},
+                          rel="notes/feature.json")
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        self.assertIsNone(decision(proc))
+
+    # ---- the message ---------------------------------------------------------
+
+    def test_ask_message_tells_the_user_how_to_proceed_not_to_edit_json(self):
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        proc = run_hook(self.SCRIPT, self._new_code_event())
+        text = reason(proc)
+        self.assertNotIn(".json", text.lower().split("me diz")[0] if "me diz" in text.lower() else text)
+        self.assertIn("dizer", text.lower())
+
+
+class TestRequireFeatureAlignmentFailsOpen(TempProject):
+    """Transversal cases the project's own history says matter most: a
+    hook must survive ANY shape of malformed input, not just the examples
+    a plan happens to list."""
+    SCRIPT = "require_feature_alignment.py"
+
+    def test_fails_open_on_garbage_stdin(self):
+        proc = run_hook(self.SCRIPT, "this is not json")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_fails_open_on_deeply_nested_json_event(self):
+        proc = run_hook(self.SCRIPT, "[" * 5000 + "]" * 5000)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_fails_open_on_top_level_non_object_event(self):
+        for raw in ["42", "null", "[1, 2, 3]", '"just a string"']:
+            proc = run_hook(self.SCRIPT, raw)
+            self.assertEqual(proc.returncode, 0, raw)
+            self.assertEqual(proc.stdout.strip(), "", raw)
+
+    def test_fails_open_on_non_string_tool_input_fields(self):
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        for bad_event in [
+            {"cwd": self.root, "tool_name": "Write",
+             "tool_input": {"file_path": 12345}},
+            {"cwd": self.root, "tool_name": "Write",
+             "tool_input": {"file_path": None}},
+            {"cwd": self.root, "tool_name": "Write", "tool_input": None},
+            {"cwd": self.root, "tool_name": "Write", "tool_input": "oops"},
+            {"cwd": 12345, "tool_name": "Write",
+             "tool_input": {"file_path": "src/x.py"}},
+        ]:
+            proc = run_hook(self.SCRIPT, bad_event)
+            self.assertEqual(proc.returncode, 0, bad_event)
+            self.assertNotIn("Traceback", proc.stderr, bad_event)
+
+    def test_fails_open_when_cwd_does_not_exist(self):
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        proc = run_hook(self.SCRIPT, {
+            "cwd": "/nonexistent/path/for/sure/xyz",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/nonexistent/path/for/sure/xyz/src/x.py"},
+        })
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_fails_open_on_path_outside_the_project(self):
+        self.write_config(BRAINSTORM_CONFIG_DENY)
+        proc = run_hook(self.SCRIPT, self.event("Write", file_path="/etc/cron.d/x.py"))
+        self.assertIsNone(decision(proc))
+        self.assertEqual(proc.returncode, 0)
+
+
+class TestBothWriteHooksAreConsulted(TempProject):
+    """Task 4 registered enforce_architecture.py AND
+    require_feature_alignment.py under the SAME `Write` matcher in
+    settings.template.json. Proving they coexist means proving each one,
+    run independently against the identical event, still produces its own
+    decision -- neither hook silently no-ops because of the other's
+    presence (they don't know about each other at all; Claude Code is what
+    runs every hook registered for a matcher)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_both_hooks_independently_flag_the_same_new_file(self):
+        cfg_dir = Path(self.root) / ".claude-for-idiots"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "config.json").write_text(json.dumps({
+            "architecture": {"name": "x", "enforce": "deny",
+                             "allowed_paths": ["app/**"], "layers": {}},
+            "brainstorm": {"enforce": "deny"},
+        }))
+        event = {"cwd": self.root, "tool_name": "Write",
+                 "tool_input": {"file_path": os.path.join(self.root, "random/thing.py")}}
+
+        arch_proc = run_hook("enforce_architecture.py", event)
+        brainstorm_proc = run_hook("require_feature_alignment.py", event)
+
+        self.assertEqual(decision(arch_proc), "deny",
+                         "enforce_architecture.py did not fire")
+        self.assertEqual(decision(brainstorm_proc), "deny",
+                         "require_feature_alignment.py did not fire")
+
+    def test_settings_template_registers_both_under_the_write_matcher(self):
+        settings = json.loads(
+            (Path(__file__).resolve().parent.parent / "assets" /
+             "settings.template.json").read_text())
+        write_groups = [g for g in settings["hooks"]["PreToolUse"]
+                        if g["matcher"] == "Write"]
+        self.assertEqual(len(write_groups), 1)
+        commands = " ".join(h["command"] for h in write_groups[0]["hooks"])
+        self.assertIn("enforce_architecture.py", commands)
+        self.assertIn("require_feature_alignment.py", commands)
+
+
+class TestRequireFeatureAlignmentPerformance(TempProject):
+    """Teto de hook: 60s. This hook reads at most two small JSON files and
+    runs one `git rev-parse` -- must be comfortably millisecond-scale, and
+    this measures it rather than assuming it."""
+
+    def test_completes_in_well_under_a_second_with_a_real_git_repo(self):
+        head = self.git_init_with_commit()
+        self.write_config(BRAINSTORM_CONFIG_ASK)
+        self.write_record({"slug": "x", "head": head, "decisions": ["a"]})
+        start = time.monotonic()
+        proc = run_hook("require_feature_alignment.py", self.event(
+            "Write", file_path=os.path.join(self.root, "src/new_thing.py")))
+        elapsed = time.monotonic() - start
+        self.assertEqual(proc.returncode, 0)
+        self.assertLess(elapsed, 2.0,
+                        f"require_feature_alignment.py took {elapsed:.3f}s")
 
 
 if __name__ == "__main__":
